@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - "src/productcatalogservice/**"
+      - "src/currencyservice/**"
       - ".github/workflows/build-sign-push.yml"
   workflow_dispatch:
 
@@ -27,11 +28,31 @@ permissions:
 
 env:
   AWS_REGION: ap-southeast-1
-  SERVICE: productcatalogservice
 
 jobs:
   build-sign-push:
+    # Tên có ${{ matrix.service }} -> UI hiện 2 dòng phân biệt được, thay vì
+    # hai job trùng tên. Quan trọng lúc debug và lúc chụp màn hình làm portfolio.
+    name: build-sign-push (${{ matrix.service }})
     runs-on: ubuntu-latest
+
+    strategy:
+      # KHÔNG fail-fast. Mặc định GitHub là true: leg nào đỏ trước sẽ HỦY leg
+      # còn lại đang chạy. Ở bước 7 ta CỐ TÌNH cắm CVE vào currencyservice —
+      # bằng chứng cần thấy là "productcatalog XANH, currency ĐỎ" trong cùng
+      # một run, tức gate chặn CHỌN LỌC đúng service bẩn. fail-fast: true giết
+      # mất đúng cái bằng chứng đó, chỉ còn "pipeline chết" — vô nghĩa.
+      fail-fast: false
+      matrix:
+        service: [productcatalogservice, currencyservice]
+
+    # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
+    # lúc GitHub đọc `env:` toàn cục -> để trên đó lỗi ngay
+    # "Unrecognized named-value: 'matrix'". Ở đây thì hợp lệ — và nhờ vậy mọi
+    # step bên dưới giữ nguyên ${SERVICE}, không phải sửa một dòng nào.
+    env:
+      SERVICE: ${{ matrix.service }}
+
     steps:
       - uses: actions/checkout@v4
 
