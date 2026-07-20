@@ -1,0 +1,112 @@
+# ─────────────────────────────────────────────────────────────
+# ĐƯỜNG ỐNG TRẦN — CHƯA CÓ GATE BẢO MẬT NÀO. Cố ý.
+#
+# Mục tiêu duy nhất: chứng minh 2 mảnh RỦI RO NHẤT chạy được thật:
+#   1. OIDC  — GitHub -> AWS AssumeRoleWithWebIdentity (immutable subject claim)
+#   2. cosign keyless — ký digest qua Fulcio/Rekor, không quản key nào
+#
+# Gate (gitleaks/Semgrep/Trivy/syft) nhét vào ở bước sau, đúng vị trí runtime.
+# Xây phần khó TRƯỚC: giả định sai thì biết ngay, không phải sau 7 gate xanh.
+# ─────────────────────────────────────────────────────────────
+name: build-sign-push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/productcatalogservice/**"
+      - ".github/workflows/build-sign-push.yml"
+  workflow_dispatch:
+
+# Least privilege ở tầng workflow — mặc định của GitHub rộng hơn mức cần.
+permissions:
+  contents: read
+  # BẮT BUỘC. Thiếu dòng này runner không xin được token OIDC -> chết CẢ hai:
+  # assume role AWS lẫn cosign keyless (cả hai đều tiêu thụ cùng một token).
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-1
+  SERVICE: productcatalogservice
+
+jobs:
+  build-sign-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── TẠM THỜI — xóa sau lần chạy xanh đầu tiên ────────────────────
+      # AWS từ chối AssumeRoleWithWebIdentity mà KHÔNG nói vì sao: không báo
+      # sub lệch hay aud lệch. Bước này in 'sub' THẬT để so với output
+      # `github_actions_expected_sub` bên Terraform -> lệch chỗ nào thấy ngay.
+      # An toàn: chỉ decode PAYLOAD (đoạn giữa JWT, không phải chữ ký), và
+      # KHÔNG bao giờ echo cả token ra log.
+      - name: Show OIDC claims (TEMPORARY)
+        run: |
+          TOKEN=$(curl -sSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | jq -r '.value')
+          echo "$TOKEN" | python3 -c '
+          import sys, json, base64
+          p = sys.stdin.read().strip().split(".")[1]
+          p += "=" * (-len(p) % 4)          # JWT dùng base64url KHÔNG padding
+          c = json.loads(base64.urlsafe_b64decode(p))
+          print(json.dumps({k: c.get(k) for k in ("sub", "aud", "repository", "ref")}, indent=2))
+          '
+
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Để ở repo VARIABLE (không phải secret): ARN không bí mật, nhưng
+          # chứa account ID -> giữ ngoài file commit của repo public.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        id: build
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.ecr.outputs.registry }}/${SERVICE}"
+
+          # Tag = commit SHA -> truy vết ngược từ image về đúng dòng code.
+          # ECR đang IMMUTABLE: push LẠI cùng tag sẽ bị từ chối (đó là tính năng
+          # chống tag-swap, không phải lỗi). Muốn chạy lại pipeline trên cùng
+          # code: tạo commit rỗng `git commit --allow-empty`, đừng re-run.
+          TAG="${GITHUB_SHA::12}"
+
+          docker build -t "$IMAGE:$TAG" "src/${SERVICE}"
+          docker push "$IMAGE:$TAG"
+
+          # DIGEST mới là thứ được ký. Tag đổi được; digest thì không —
+          # nó là hàm băm của chính nội dung image.
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$TAG" | cut -d@ -f2)
+          [ -n "$DIGEST" ] || { echo "::error::không lấy được digest sau khi push"; exit 1; }
+
+          echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Đã push: ${IMAGE}@${DIGEST}"
+
+      - uses: sigstore/cosign-installer@v3
+
+      # KEYLESS: không có private key nào tồn tại, ở đâu cả.
+      # cosign đổi token OIDC của chính workflow này lấy chứng chỉ NGẮN HẠN từ
+      # Fulcio, ký, rồi ghi bằng chứng vào log công khai append-only Rekor.
+      # Danh tính người ký = "workflow X của repo Y trên nhánh main", chứ không
+      # phải "ai đó đang giữ file key". Không có key -> không có key để lộ, để
+      # xoay vòng, hay để mất.
+      - name: Sign image (keyless)
+        run: cosign sign --yes "${{ steps.build.outputs.ref }}"
+
+      # Verify ngay trong pipeline: chữ ký vô nghĩa nếu chưa từng ai kiểm.
+      # Đây chính là phép kiểm mà Kyverno sẽ làm trong cluster ở P3 — chạy sớm
+      # ở đây để biết nó PASS trước khi đem vào admission control.
+      - name: Verify signature
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.build.outputs.ref }}"
