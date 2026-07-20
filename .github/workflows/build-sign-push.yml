@@ -35,26 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── TẠM THỜI — xóa sau lần chạy xanh đầu tiên ────────────────────
-      # AWS từ chối AssumeRoleWithWebIdentity mà KHÔNG nói vì sao: không báo
-      # sub lệch hay aud lệch. Bước này in 'sub' THẬT để so với output
-      # `github_actions_expected_sub` bên Terraform -> lệch chỗ nào thấy ngay.
-      # An toàn: chỉ decode PAYLOAD (đoạn giữa JWT, không phải chữ ký), và
-      # KHÔNG bao giờ echo cả token ra log.
-      - name: Show OIDC claims (TEMPORARY)
-        run: |
-          TOKEN=$(curl -sSL \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
-            | jq -r '.value')
-          echo "$TOKEN" | python3 -c '
-          import sys, json, base64
-          p = sys.stdin.read().strip().split(".")[1]
-          p += "=" * (-len(p) % 4)          # JWT dùng base64url KHÔNG padding
-          c = json.loads(base64.urlsafe_b64decode(p))
-          print(json.dumps({k: c.get(k) for k in ("sub", "aud", "repository", "ref")}, indent=2))
-          '
-
+      # Bước in OIDC claims đã bị xóa sau khi nghiệm thu xong (run 29722880189):
+      # sub thật khớp tuyệt đối `github_actions_expected_sub` của Terraform.
+      # Cần dựng lại khi debug: xem git history của file này.
+      #
+      # ⚠️ CẢNH BÁO TƯƠNG LAI: ĐỔI TÊN hoặc CHUYỂN CHỦ repo sẽ làm subject claim
+      # đổi theo (GitHub cập nhật immutable claim khi rename/transfer) -> trust
+      # policy hết khớp -> CI chết. Đổi tên repo thì phải sửa `github_repo` /
+      # `github_repo_id` bên infra/bootstrap rồi apply lại.
       - name: Assume AWS role via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
