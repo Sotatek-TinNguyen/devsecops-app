@@ -12,34 +12,76 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Define a default value so it's not empty if the builder fails to provide it
+# ─────────────────────────────────────────────────────────────
+# VÌ SAO BUILDER LÀ DEBIAN CHỨ KHÔNG PHẢI ALPINE (bẫy chính của file này)
+#
+# `@google-cloud/profiler` 6.0.5 là dependency DUY NHẤT trong cây này có
+# native binding (pprof). File .node được link vào libc của MÁY BUILD:
+# alpine = musl, distroless-debian12 = glibc. Build musl rồi chạy trên glibc
+# thì dlopen fail LÚC LOAD, không phải lúc build -> "CI xanh, pod crashloop".
+# Luật: builder phải CÙNG libc với runtime.
+#
+# server.js có require profiler nằm trong nhánh `else` của DISABLE_PROFILER,
+# tức lazy. KHÔNG dựa vào đó để chạy binary musl trên glibc: quên set env var
+# ở một manifest là crashloop. Env var không phải biện pháp bảo đảm ABI.
+# ─────────────────────────────────────────────────────────────
 ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM node:20.20.2-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
+FROM --platform=$BUILDPLATFORM node:20.20.2-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
-# Some packages (e.g. @google-cloud/profiler) require additional
-# deps for post-install scripts
-RUN apk add --update --no-cache \
-    python3 \
-    make \
-    g++
+# Toolchain CHỈ sống ở stage này -> không có mặt trong image cuối. Vẫn cần vì
+# không chắc profiler 6.0.5 có prebuilt khớp ABI Node 20 glibc; thiếu thì
+# node-gyp build từ nguồn.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 \
+      make \
+      g++ \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
 
-COPY package*.json ./
+# Chỉ copy manifest trước -> layer cài dep chỉ vỡ cache khi dependency đổi,
+# không vỡ mỗi lần sửa một dòng server.js.
+COPY package.json package-lock.json ./
 
-RUN npm install --only=production
+# `npm ci` chứ KHÔNG `npm install --only=production`:
+#   - ci dựng đúng cây trong lockfile, và FAIL nếu package.json lệch lockfile.
+#     Đúng thứ ta cần ở supply chain: build không được phép âm thầm resolve
+#     version khác với cái đã review/quét/ký.
+#   - install thì resolve lại theo semver -> cùng commit, hai thời điểm, hai
+#     cây dependency khác nhau. SBOM và chữ ký khi đó nói về thứ không tái lập.
+# `--omit=dev` ở service này là no-op (không có devDependencies) — giữ cho
+# tường minh; giá trị nằm ở `ci`, không ở cờ omit.
+RUN npm ci --omit=dev
 
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-
-RUN apk add --no-cache nodejs
+# ─────────────────────────────────────────────────────────────
+# Runtime: distroless = không shell, không apk/apt, không busybox. Kẻ tấn công
+# có RCE trong app cũng không có sẵn `sh`/`curl`/`wget` để leo tiếp.
+# Pin bằng DIGEST vì tag `nonroot` là con trỏ DI ĐỘNG: cùng commit hôm nay ra
+# image A, mai ra image B -> chữ ký cosign + SBOM nói về thứ không tái lập.
+# Digest resolve từ registry API; `config.User = "65532"` đã VERIFY, không đoán.
+# ─────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/nodejs20-debian12:nonroot@sha256:2cd820156cf039c8b54ae2d2a97e424b6729070714de8707a6b79f20d56f6a9a
 
 WORKDIR /usr/src/app
 
 COPY --from=builder /usr/src/app/node_modules ./node_modules
 
+# `.dockerignore` đã loại node_modules/ và client.js -> dòng này không đè lên
+# node_modules vừa copy ở trên.
 COPY . .
 
+# Base đã chạy 65532, lặp lại bằng SỐ có chủ đích: hiện trong file cho
+# hadolint/auditor đọc, và K8s `runAsNonRoot: true` KHÔNG resolve username —
+# nó chỉ đọc UID số. Đây là dòng làm PodSecurity `restricted` ở P5 pass mà
+# không phải vá securityContext từng deployment.
+USER 65532:65532
+
+# 7000 > 1024 nên tiến trình nonroot bind được, không cần NET_BIND_SERVICE.
 EXPOSE 7000
 
-ENTRYPOINT [ "node", "server.js" ]
+# KHÔNG dùng `ENTRYPOINT ["node", "server.js"]` như bản alpine: image này đã
+# có sẵn ENTRYPOINT ["/nodejs/bin/node"] (đã đọc từ image config), và
+# distroless không có shell lẫn `node` trong PATH -> viết vậy là exec fail.
+# Chỉ truyền tên script qua CMD, để base lo phần chạy node.
+CMD ["server.js"]
