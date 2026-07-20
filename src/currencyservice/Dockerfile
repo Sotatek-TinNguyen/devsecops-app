@@ -13,30 +13,17 @@
 # limitations under the License.
 
 # ─────────────────────────────────────────────────────────────
-# VÌ SAO BUILDER LÀ DEBIAN CHỨ KHÔNG PHẢI ALPINE (bẫy chính của file này)
-#
-# `@google-cloud/profiler` 6.0.5 là dependency DUY NHẤT trong cây này có
-# native binding (pprof). File .node được link vào libc của MÁY BUILD:
-# alpine = musl, distroless-debian12 = glibc. Build musl rồi chạy trên glibc
-# thì dlopen fail LÚC LOAD, không phải lúc build -> "CI xanh, pod crashloop".
-# Luật: builder phải CÙNG libc với runtime.
-#
-# server.js có require profiler nằm trong nhánh `else` của DISABLE_PROFILER,
-# tức lazy. KHÔNG dựa vào đó để chạy binary musl trên glibc: quên set env var
-# ở một manifest là crashloop. Env var không phải biện pháp bảo đảm ABI.
+# Builder KHÔNG còn bắt buộc phải glibc: `@google-cloud/profiler` (dependency
+# native duy nhất trong cây, kéo theo pprof/node-gyp) đã gỡ khỏi package.json.
+# Verify: sau `npm install`, không package nào còn `hasInstallScript` ngoài
+# `protobufjs` (script đó thuần JS, chỉ check version — không compile), và
+# không còn file `.node` nào trong node_modules. Vẫn giữ bookworm-slim thay vì
+# quay lại alpine: digest này đã pin + chạy XANH thật ở 5c, đổi base image lúc
+# này là churn không cần, không phải fix gì.
 # ─────────────────────────────────────────────────────────────
 ARG BUILDPLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM node:20.20.2-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
-
-# Toolchain CHỈ sống ở stage này -> không có mặt trong image cuối. Vẫn cần vì
-# không chắc profiler 6.0.5 có prebuilt khớp ABI Node 20 glibc; thiếu thì
-# node-gyp build từ nguồn.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 \
-      make \
-      g++ \
- && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
 
