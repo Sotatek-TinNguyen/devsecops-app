@@ -29,7 +29,18 @@ COPY . .
 ARG SKAFFOLD_GO_GCFLAGS
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=0 go build -ldflags="-s -w" -gcflags="${SKAFFOLD_GO_GCFLAGS}" -o /productcatalogservice .
 
-FROM gcr.io/distroless/static
+# PIN BY DIGEST + NONROOT (khac upstream — upstream dung `distroless/static`
+# tran: tag `latest` ngam + chay UID 0).
+#   - `:nonroot`  -> image config dat User=65532 (da verify bang registry API).
+#   - `@sha256:`  -> tag la con tro DI DONG, digest thi bat bien. Khong pin =
+#     hom nay build ra 1 image, mai build ra image KHAC tu cung commit ->
+#     chu ky cosign + SBOM noi ve mot thu khong tai lap duoc.
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
+
+# Lap lai USER dù image da set san: (1) hien ra ngay trong file, auditor/hadolint
+# doc duoc, khong phai di lan vao base image; (2) UID dang SO — K8s
+# `runAsNonRoot: true` khong resolve duoc username, chi doc duoc so.
+USER 65532:65532
 
 WORKDIR /src
 COPY --from=builder /productcatalogservice ./server
