@@ -1,12 +1,22 @@
 # ─────────────────────────────────────────────────────────────
-# ĐƯỜNG ỐNG TRẦN — CHƯA CÓ GATE BẢO MẬT NÀO. Cố ý.
+# THỨ TỰ GATE = THỨ TỰ RUNTIME (rẻ/nhanh trước, đắt/chậm sau) -> fail fast.
+# Sâu hơn tốc độ: mọi gate NGUỒN đứng TRƯỚC bước ký. cosign ghi chữ ký vào
+# Rekor = log CÔNG KHAI, append-only, gần như không xoá được -> không thứ gì
+# được ký + phơi vĩnh viễn trừ khi đã qua hết secret/SAST/SCA/image scan.
+# Đặt gate trước ký là giảm blast radius của chính hành động ký, không chỉ
+# tiết kiệm phút runner.
 #
-# Mục tiêu duy nhất: chứng minh 2 mảnh RỦI RO NHẤT chạy được thật:
-#   1. OIDC  — GitHub -> AWS AssumeRoleWithWebIdentity (immutable subject claim)
-#   2. cosign keyless — ký digest qua Fulcio/Rekor, không quản key nào
+#   gate-common (1 lần):  gitleaks (secret)                     <- 6a  [DONE]
+#   mỗi service (matrix): Semgrep (SAST) -> Trivy SCA (dep)     <- 6b
+#                         -> build -> Trivy image -> push       <- 6c
+#                         -> cosign sign -> syft SBOM + attest  <- 6d
+#                         -> verify sign + verify-attestation   <- 6e
+#                         (SARIF cả 3 tool -> tab Security       <- 6f)
 #
-# Gate (gitleaks/Semgrep/Trivy/syft) nhét vào ở bước sau, đúng vị trí runtime.
-# Xây phần khó TRƯỚC: giả định sai thì biết ngay, không phải sau 7 gate xanh.
+# gitleaks TÁCH khỏi matrix: secret không thuộc riêng service nào; đỏ ở
+# gate-common -> skip CẢ hai leg TRƯỚC khi build. Semgrep/Trivy nằm TRONG
+# matrix -> chỉ đỏ leg bẩn, leg sạch vẫn xanh (giữ bằng chứng "currency ĐỎ,
+# productcatalog XANH cùng một run" cho bước cắm-CVE).
 # ─────────────────────────────────────────────────────────────
 name: build-sign-push
 
@@ -30,11 +40,63 @@ env:
   AWS_REGION: ap-southeast-1
 
 jobs:
+  # ─────────────────────────────────────────────────────────────
+  # GATE CHUNG — chạy MỘT lần, KHÔNG theo matrix. Secret không thuộc riêng
+  # service nào (cả hai leg cùng soi một cây mã) -> để trong matrix là quét
+  # lặp vô ích. Tách ra + matrix `needs:` job này -> secret rò rỉ chặn CẢ
+  # pipeline trước khi bất cứ gì được build/push/ký.
+  # ─────────────────────────────────────────────────────────────
+  gate-common:
+    name: gate-common (gitleaks)
+    runs-on: ubuntu-latest
+    # Least privilege TẦNG JOB: job này chỉ checkout để quét, KHÔNG cần OIDC.
+    # Khai `contents: read` -> id-token tụt về NONE cho RIÊNG job này (perms
+    # tầng job THAY THẾ tầng workflow, không cộng dồn) -> gate-common không hề
+    # có khả năng xin token AWS/cosign. Chỉ job build mới giữ id-token:write.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin 8.30.1 — TRÙNG gitleaks trong pre-commit repo infra: dev quét local
+      # và CI quét bằng CÙNG ruleset, không lệch phiên bản luật. Tải từ release
+      # chính thức qua HTTPS; tên asset đã xác minh tồn tại trước khi ghi vào đây.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.30.1
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            -o "$RUNNER_TEMP/gitleaks.tar.gz"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gitleaks" version
+
+      # `dir .` = quét CÂY LÀM VIỆC hiện tại, KHÔNG phải full git history.
+      # Fork mang 2709 commit của Google -> quét history mỗi push là (a) lặp
+      # việc đã xác minh sạch, (b) COUPLING gate với code ta không sở hữu: một
+      # luật gitleaks mới trúng commit cũ của Google = gate đỏ vì thứ ngoài
+      # thay đổi của Raf. checkout mặc định depth=1 là đủ vì chỉ soi cây hiện tại.
+      #
+      # KHÔNG scope theo service (khác Semgrep 6b): secret rò rỉ ở BẤT KỲ file
+      # nào cũng là sự cố phải xử -> quét cả cây. Semgrep thì scope src/SERVICE
+      # vì lỗi chất lượng code chỉ ở code TA nuôi mới là trách nhiệm của ta.
+      #
+      # `--redact`: trúng thì KHÔNG in giá trị secret ra log (in ra = lộ lại
+      # lần nữa, ngay trong artifact công khai). Exit 1 mặc định khi có leak
+      # -> đỏ job. Xuất SARIF lên tab Security để ở 6f.
+      - name: gitleaks (secret scan)
+        run: gitleaks dir . --redact --verbose
+
   build-sign-push:
     # Tên có ${{ matrix.service }} -> UI hiện 2 dòng phân biệt được, thay vì
     # hai job trùng tên. Quan trọng lúc debug và lúc chụp màn hình làm portfolio.
     name: build-sign-push (${{ matrix.service }})
     runs-on: ubuntu-latest
+
+    # Không build/ký nếu secret scan chưa xanh. gate-common đỏ -> CẢ hai leg
+    # matrix bị skip; không gì được build, push, hay ghi vào Rekor.
+    needs: gate-common
 
     strategy:
       # KHÔNG fail-fast. Mặc định GitHub là true: leg nào đỏ trước sẽ HỦY leg
