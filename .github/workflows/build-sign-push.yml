@@ -118,6 +118,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── 6b: GATE NGUỒN theo service, chèn TRƯỚC "Assume AWS role" ──
+      # Cả hai đứng trước OIDC/build/ký: code chưa qua static check thì KHÔNG
+      # tiêu tốn credential AWS, và tuyệt đối không gì được ký + ghi Rekor.
+      # Nằm TRONG matrix (khác gitleaks ở gate-common) -> chỉ đỏ leg bẩn, leg
+      # sạch vẫn xanh = giữ bằng chứng "currency ĐỎ, productcatalog XANH cùng
+      # một run" cho bước cắm-CVE (7).
+
+      # SAST = lỗi trong code TA viết (khác gitleaks: secret; khác Trivy SCA:
+      # lỗi trong lib người khác). Pin 1.170.0 = bản đã verify local.
+      - name: Install Semgrep
+        run: |
+          set -euo pipefail
+          pipx install semgrep==1.170.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/semgrep" --version
+
+      # Scope src/SERVICE: quét cả repo sẽ báo code 9 service Google không thuộc
+      # trách nhiệm mình = nhiễu. p/ci = ruleset bảo mật registry; --severity
+      # ERROR chỉ chặn phát hiện độ tin cậy cao (bỏ WARNING/INFO khỏi gate);
+      # --error = exit!=0 khi có finding -> đỏ leg. --metrics off: không gửi
+      # telemetry. Baseline verify local: 0 finding cả 2 service.
+      - name: Semgrep (SAST)
+        run: semgrep scan --config p/ci --severity ERROR --error --metrics off "src/${SERVICE}"
+
+      # Pin trivy v0.72.0, tải từ release chính thức (KHÔNG `curl|sh` từ main —
+      # kém sạch trong đúng project về supply-chain); tên asset đã xác minh tồn
+      # tại trước khi ghi URL. Đồng bộ cách hand-install gitleaks ở 6a.
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          VERSION=0.72.0
+          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_Linux-64bit.tar.gz" \
+            -o "$RUNNER_TEMP/trivy.tar.gz"
+          tar -xzf "$RUNNER_TEMP/trivy.tar.gz" -C "$RUNNER_TEMP" trivy
+          chmod +x "$RUNNER_TEMP/trivy"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/trivy" --version
+
+      # SCA = CVE đã biết trong DEPENDENCY (quét lockfile, CHƯA cần build image
+      # — khác Trivy image ở 6c quét cả filesystem image). --ignore-unfixed:
+      # chỉ chặn CVE CÓ bản vá; CVE chưa có fix mà chặn thì pipeline kẹt cứng
+      # không hành động được (bẫy "đỏ vì thứ không sửa nổi") -> chính sách gate
+      # = "phải áp bản vá có sẵn". CRITICAL,HIGH mới chặn. Baseline verify local
+      # ĐÚNG lệnh này: exit 0 cả 2 service sau khi 6-pre dọn currencyservice.
+      - name: Trivy SCA (dependencies)
+        run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "src/${SERVICE}"
+
       # Bước in OIDC claims đã bị xóa sau khi nghiệm thu xong (run 29722880189):
       # sub thật khớp tuyệt đối `github_actions_expected_sub` của Terraform.
       # Cần dựng lại khi debug: xem git history của file này.
