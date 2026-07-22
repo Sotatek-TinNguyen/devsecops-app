@@ -1,0 +1,18 @@
+# .trivyignore — CVE đã TRIAGE là KHÔNG vá được từ phía ta HÔM NAY (accept-with-
+# visibility, đúng kỷ luật model B). KHÔNG dùng để giấu nợ vá-được.
+#
+# 6 CVE libssl3 (OpenSSL) dưới đây nằm ở OS layer của base image
+# gcr.io/distroless/nodejs20-debian12:nonroot (runtime của currencyservice).
+# Debian ĐÃ phát hành bản vá (3.0.19 / 3.0.20-1~deb12u2) nhưng distroless CHƯA
+# rebuild base với package vá — verify 2026-07-22: tag `nonroot` mới nhất = CÙNG
+# digest đang pin (sha256:2cd82015…), vẫn dính đủ 6. Ta KHÔNG build base này ->
+# không vá được tới khi upstream rebuild. Bỏ chặn theo ID CỤ THỂ (libssl3-
+# specific: không đụng leg productcatalog distroless-static, không đụng bước SCA
+# lockfile). Mọi CVE khác vẫn bị chặn.
+# REVISIT khi distroless nodejs20-debian12 rebuild — xem "Việc đang TREO".
+CVE-2026-31789
+CVE-2026-28387
+CVE-2026-28388
+CVE-2026-28389
+CVE-2026-28390
+CVE-2026-45447
