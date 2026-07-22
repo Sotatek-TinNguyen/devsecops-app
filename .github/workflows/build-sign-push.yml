@@ -131,8 +131,11 @@ jobs:
         run: |
           set -euo pipefail
           pipx install semgrep==1.170.0
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/semgrep" --version
+          # pipx trên GitHub-hosted runner đặt shim ở /opt/pipx_bin (PIPX_BIN_DIR
+          # image cài sẵn), KHÔNG phải ~/.local/bin -> hỏi pipx thay vì đoán.
+          BIN_DIR="$(pipx environment --value PIPX_BIN_DIR)"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          "$BIN_DIR/semgrep" --version
 
       # Scope src/SERVICE: quét cả repo sẽ báo code 9 service Google không thuộc
       # trách nhiệm mình = nhiễu. p/ci = ruleset bảo mật registry; --severity
