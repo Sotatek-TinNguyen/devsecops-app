@@ -188,28 +188,43 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push
+      # ── 6c: tách "Build and push" cũ thành build → quét IMAGE → push ──
+      # Quét TRƯỚC push: image bẩn (CVE ở lớp OS/base + thứ nướng vào image —
+      # cái Trivy SCA đọc-lockfile ở 6b KHÔNG thấy) tuyệt đối không chạm ECR.
+      # Ba step rời -> đỏ quy đúng step (build vỡ ≠ image bẩn ≠ push lỗi).
+      - name: Build image
         id: build
         run: |
           set -euo pipefail
           IMAGE="${{ steps.ecr.outputs.registry }}/${SERVICE}"
-
           # Tag = commit SHA -> truy vết ngược từ image về đúng dòng code.
-          # ECR đang IMMUTABLE: push LẠI cùng tag sẽ bị từ chối (đó là tính năng
-          # chống tag-swap, không phải lỗi). Muốn chạy lại pipeline trên cùng
-          # code: tạo commit rỗng `git commit --allow-empty`, đừng re-run.
+          # ECR đang IMMUTABLE: push LẠI cùng tag sẽ bị từ chối (chống tag-swap,
+          # không phải lỗi). Chạy lại trên cùng code: `git commit --allow-empty`.
           TAG="${GITHUB_SHA::12}"
-
           docker build -t "$IMAGE:$TAG" "src/${SERVICE}"
-          docker push "$IMAGE:$TAG"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
 
-          # DIGEST mới là thứ được ký. Tag đổi được; digest thì không —
-          # nó là hàm băm của chính nội dung image.
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$TAG" | cut -d@ -f2)
+      # Quét chính IMAGE vừa build (còn ở docker local, CHƯA push). Cùng chính
+      # sách 6b: --ignore-unfixed + CRITICAL,HIGH. Blocking cho 2 service nuôi
+      # (đã sạch); khi expand 11 -> bọc step này bằng cờ `enforce` per-service
+      # (model B: observe rồi enforce). DB vuln đã cache từ Trivy SCA -> không
+      # tải lại 100MB.
+      - name: Trivy image scan
+        run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
+
+      # Chỉ push khi image QUA quét. DIGEST (băm nội dung image) chỉ có SAU push,
+      # là thứ đem đi ký — tag đổi được, digest thì không.
+      - name: Push image
+        id: push
+        run: |
+          set -euo pipefail
+          REF_TAG="${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
+          docker push "$REF_TAG"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REF_TAG" | cut -d@ -f2)
           [ -n "$DIGEST" ] || { echo "::error::không lấy được digest sau khi push"; exit 1; }
-
-          echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "Đã push: ${IMAGE}@${DIGEST}"
+          echo "ref=${{ steps.build.outputs.image }}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Đã push: ${{ steps.build.outputs.image }}@${DIGEST}"
 
       - uses: sigstore/cosign-installer@v3
 
@@ -220,7 +235,7 @@ jobs:
       # phải "ai đó đang giữ file key". Không có key -> không có key để lộ, để
       # xoay vòng, hay để mất.
       - name: Sign image (keyless)
-        run: cosign sign --yes "${{ steps.build.outputs.ref }}"
+        run: cosign sign --yes "${{ steps.push.outputs.ref }}"
 
       # Verify ngay trong pipeline: chữ ký vô nghĩa nếu chưa từng ai kiểm.
       # Đây chính là phép kiểm mà Kyverno sẽ làm trong cluster ở P3 — chạy sớm
@@ -230,4 +245,4 @@ jobs:
           cosign verify \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ steps.build.outputs.ref }}"
+            "${{ steps.push.outputs.ref }}"
