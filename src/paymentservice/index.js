@@ -18,18 +18,11 @@
 
 const logger = require('./logger')
 
-if (process.env.DISABLE_PROFILER) {
-  logger.info("Profiler disabled.")
-} else {
-  logger.info("Profiler enabled.")
-  require('@google-cloud/profiler').start({
-    serviceContext: {
-      service: 'paymentservice',
-      version: '1.0.0'
-    }
-  });
-}
-
+// @google-cloud/profiler đã GỠ (EXP-3c-1). Nó kéo theo chuỗi build-tooling
+// native (pprof -> @mapbox/node-pre-gyp -> tar/minimatch/brace-expansion) =
+// phần lớn CVE của service này — đúng thủ phạm đã gỡ ở currencyservice (I-017).
+// Cả biến DISABLE_PROFILER cũng bỏ theo vì không còn gì để bật/tắt. Profiling
+// APM không phải yêu cầu của lab; muốn lại thì thêm ở P4 cùng cả cụm OTel.
 
 if (process.env.ENABLE_TRACING == "1") {
   logger.info("Tracing enabled.")
