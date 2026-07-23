@@ -2,13 +2,18 @@
 # visibility, đúng kỷ luật model B). KHÔNG dùng để giấu nợ vá-được.
 #
 # 6 CVE libssl3 (OpenSSL) dưới đây nằm ở OS layer của base image
-# gcr.io/distroless/nodejs20-debian12:nonroot (runtime của currencyservice).
+# gcr.io/distroless/nodejs20-debian12:nonroot — runtime của currencyservice VÀ
+# paymentservice (từ EXP-3c-1b). Cả hai dùng CÙNG digest nên dính CÙNG 6 CVE;
+# ignore theo-ID nên MỘT khối này cover cả hai, không phải nhân đôi.
 # Debian ĐÃ phát hành bản vá (3.0.19 / 3.0.20-1~deb12u2) nhưng distroless CHƯA
-# rebuild base với package vá — verify 2026-07-22: tag `nonroot` mới nhất = CÙNG
+# rebuild base với package vá — verify 2026-07-24: tag `nonroot` mới nhất = CÙNG
 # digest đang pin (sha256:2cd82015…), vẫn dính đủ 6. Ta KHÔNG build base này ->
 # không vá được tới khi upstream rebuild. Bỏ chặn theo ID CỤ THỂ (libssl3-
 # specific: không đụng leg productcatalog distroless-static, không đụng bước SCA
 # lockfile). Mọi CVE khác vẫn bị chặn.
+# ⚠️ Ignore theo-ID áp TOÀN CỤC mọi service: nếu sau này 1 service dùng base
+# KHÁC mà tình cờ cũng dính 1 trong 6 ID này thì sẽ bị bỏ chặn "nhờ" — hôm đó
+# phải soi lại. Giá của việc gọn hôm nay.
 # REVISIT khi distroless nodejs20-debian12 rebuild — xem "Việc đang TREO".
 CVE-2026-31789
 CVE-2026-28387
