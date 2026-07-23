@@ -58,6 +58,10 @@ jobs:
     # có khả năng xin token AWS/cosign. Chỉ job build mới giữ id-token:write.
     permissions:
       contents: read
+      # 6f: BẮT BUỘC để đẩy SARIF lên code scanning. Khai ở TẦNG JOB chứ không
+      # nới ở tầng workflow -> chỉ job cần mới có, và gate-common VẪN không có
+      # id-token (boundary cũ không suy suyển).
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -87,9 +91,31 @@ jobs:
       #
       # `--redact`: trúng thì KHÔNG in giá trị secret ra log (in ra = lộ lại
       # lần nữa, ngay trong artifact công khai). Exit 1 mặc định khi có leak
-      # -> đỏ job. Xuất SARIF lên tab Security để ở 6f.
+      # -> đỏ job.
+      #
+      # 6f: thêm `--report-*` -> MỘT lần chạy vừa gác cổng vừa đẻ SARIF. Không
+      # phải tool nào cũng làm được vậy (Trivy/Semgrep chỉ nhận 1 format/lần
+      # -> ở 6f-2 phải chạy 2 lượt). Verify local 8.30.1: cây SẠCH vẫn ghi file
+      # SARIF 2.1.0 hợp lệ (0 results) + exit 0 -> upload dưới không bao giờ
+      # đứng trước file rỗng.
       - name: gitleaks (secret scan)
-        run: gitleaks dir . --redact --verbose
+        run: gitleaks dir . --redact --verbose --report-format sarif --report-path gitleaks.sarif
+
+      # `if: always()` là CẢ Ý NGHĨA của step này, không phải cho chắc.
+      # Thiếu nó: có leak -> step trên đỏ -> step này bị SKIP -> tab Security
+      # trống RÕ ĐÚNG LÚC CÓ PHÁT HIỆN. Tức là công cụ báo cáo im lặng đúng
+      # lúc cần nó nhất — hỏng ngược, kiểu hỏng tệ nhất của một hệ thống cảnh báo.
+      #
+      # `category` phải DUY NHẤT cho mỗi (tool × đối tượng quét): code scanning
+      # gom kết quả theo category, hai lần upload cùng category thì lần sau ĐÈ
+      # lần trước. gate-common chỉ có 1 lượt quét nên "gitleaks" là đủ; ở 6f-2
+      # matrix 2 leg thì phải kèm tên service.
+      - name: Upload gitleaks SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
 
   build-sign-push:
     # Tên có ${{ matrix.service }} -> UI hiện 2 dòng phân biệt được, thay vì
