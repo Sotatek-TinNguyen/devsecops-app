@@ -144,6 +144,16 @@ jobs:
     env:
       SERVICE: ${{ matrix.service }}
 
+    # 6f-2: job này TRƯỚC GIỜ không khai `permissions` -> thừa hưởng tầng
+    # workflow. Vừa khai ra là THAY THẾ toàn bộ, KHÔNG cộng dồn (đúng cơ chế đã
+    # ghi ở gate-common) -> phải liệt kê LẠI `id-token: write`, quên là cosign
+    # keyless + assume role AWS chết cùng lúc. Khai tường minh ở đây thay vì nới
+    # `security-events` ở tầng workflow: job nào cần thì job đó xin.
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -171,8 +181,35 @@ jobs:
       # ERROR chỉ chặn phát hiện độ tin cậy cao (bỏ WARNING/INFO khỏi gate);
       # --error = exit!=0 khi có finding -> đỏ leg. --metrics off: không gửi
       # telemetry. Baseline verify local: 0 finding cả 2 service.
+      # 6f-2: HAI lượt chạy, cố ý. Trivy/Semgrep chỉ nhận MỘT format mỗi lần
+      # (khác gitleaks ở 6f-1 làm được cả hai trong 1 lượt).
+      #   lượt 1 = báo cáo: xuất SARIF, KHÔNG `--error` -> luôn exit 0.
+      #   lượt 2 = gác cổng: giữ NGUYÊN TỪNG KÝ TỰ dòng cũ.
+      # Giữ nguyên dòng gate là có chủ đích: nếu CI đỏ sau commit này thì chắc
+      # chắn KHÔNG phải vì tôi đụng vào ngưỡng chặn. Giá phải trả là quét 2 lần
+      # (rule/DB đã cache nên lượt 2 nhanh) — chấp nhận ở 2 service; lúc expand
+      # 11 service thì đây là chỗ đầu tiên phải tối ưu.
+      - name: Semgrep SARIF (report)
+        run: semgrep scan --config p/ci --severity ERROR --metrics off --sarif --output semgrep.sarif "src/${SERVICE}"
+
       - name: Semgrep (SAST)
+        id: semgrep
         run: semgrep scan --config p/ci --severity ERROR --error --metrics off "src/${SERVICE}"
+
+      # Guard viết dài dòng CÓ LÝ DO: `always()` một mình sẽ chạy step này kể cả
+      # khi các step trên bị SKIP (vd Semgrep SARIF hỏng) -> upload vấp file
+      # không tồn tại -> đỏ vì lý do vặt. Bắt buộc conclusion phải là
+      # success/failure = "step đã THỰC SỰ chạy", chứ không dựa vào việc đoán
+      # context trả gì cho step chưa chạy.
+      - name: Upload Semgrep SARIF
+        if: always() && (steps.semgrep.conclusion == 'success' || steps.semgrep.conclusion == 'failure')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          # category PHẢI kèm tên service: 2 leg matrix upload cùng lúc, trùng
+          # category thì leg sau ĐÈ kết quả leg trước -> mất nửa số phát hiện
+          # mà tab Security vẫn trông "bình thường".
+          category: semgrep-${{ matrix.service }}
 
       # Pin trivy v0.72.0, tải từ release chính thức (KHÔNG `curl|sh` từ main —
       # kém sạch trong đúng project về supply-chain); tên asset đã xác minh tồn
@@ -194,8 +231,19 @@ jobs:
       # không hành động được (bẫy "đỏ vì thứ không sửa nổi") -> chính sách gate
       # = "phải áp bản vá có sẵn". CRITICAL,HIGH mới chặn. Baseline verify local
       # ĐÚNG lệnh này: exit 0 cả 2 service sau khi 6-pre dọn currencyservice.
+      - name: Trivy SCA SARIF (report)
+        run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format sarif --output trivy-sca.sarif "src/${SERVICE}"
+
       - name: Trivy SCA (dependencies)
+        id: sca
         run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "src/${SERVICE}"
+
+      - name: Upload Trivy SCA SARIF
+        if: always() && (steps.sca.conclusion == 'success' || steps.sca.conclusion == 'failure')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-sca.sarif
+          category: trivy-sca-${{ matrix.service }}
 
       # Bước in OIDC claims đã bị xóa sau khi nghiệm thu xong (run 29722880189):
       # sub thật khớp tuyệt đối `github_actions_expected_sub` của Terraform.
@@ -239,8 +287,22 @@ jobs:
       # (đã sạch); khi expand 11 -> bọc step này bằng cờ `enforce` per-service
       # (model B: observe rồi enforce). DB vuln đã cache từ Trivy SCA -> không
       # tải lại 100MB.
+      - name: Trivy image SARIF (report)
+        run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format sarif --output trivy-image.sarif "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
+
       - name: Trivy image scan
+        id: imagescan
         run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
+
+      # Đây là SARIF nói về ARTIFACT (lớp OS + base), khác trivy-sca nói về
+      # DEPENDENCY khai trong lockfile -> hai category riêng, đừng gộp: gộp thì
+      # mất khả năng trả lời "CVE này đến từ code tôi khai hay từ base image?".
+      - name: Upload Trivy image SARIF
+        if: always() && (steps.imagescan.conclusion == 'success' || steps.imagescan.conclusion == 'failure')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image-${{ matrix.service }}
 
       # Chỉ push khi image QUA quét. DIGEST (băm nội dung image) chỉ có SAU push,
       # là thứ đem đi ký — tag đổi được, digest thì không.
