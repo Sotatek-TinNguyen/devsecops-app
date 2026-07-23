@@ -15,7 +15,12 @@
 # Define a default value so it's not empty if the builder fails to provide it
 ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS builder
+# 1.26.4 -> 1.26.5 vá Go stdlib CVE-2026-39822. Stdlib biên dịch THẲNG vào
+# binary -> CVE đi theo artifact, không nằm trong go.mod: `trivy fs` không thấy,
+# chỉ `trivy image` thấy. Sửa = đổi toolchain BUILD, không phải dependency.
+# `toolchain go1.26.4` trong go.mod giữ nguyên (nó là SÀN, không phải mức ghim).
+# Cùng digest với 3 service Go kia — một base = một thứ phải theo dõi.
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 WORKDIR /src
@@ -29,7 +34,14 @@ COPY . .
 ARG SKAFFOLD_GO_GCFLAGS
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=0 go build -ldflags="-s -w" -gcflags="${SKAFFOLD_GO_GCFLAGS}" -o /go/bin/shippingservice .
 
-FROM gcr.io/distroless/static
+# PIN DIGEST + NONROOT (như 5a). `distroless/static` trần = tag `latest` NGẦM
+# (con trỏ di động -> cùng commit ra image khác nhau, chữ ký + SBOM nói về thứ
+# không tái lập được) + chạy UID 0 (P5 PodSecurity `restricted` sẽ chặn pod).
+# Digest xác minh 2026-07-23: `:nonroot` vẫn resolve về đúng sha này.
+FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
+
+# UID dạng SỐ vì `runAsNonRoot` không resolve username. Port 50051 > 1024 -> bind được.
+USER 65532:65532
 
 WORKDIR /src
 COPY --from=builder /go/bin/shippingservice /src/shippingservice
