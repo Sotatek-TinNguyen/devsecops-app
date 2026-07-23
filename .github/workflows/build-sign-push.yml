@@ -228,24 +228,36 @@ jobs:
             sast: "off"
 
           # ── EXPAND lô 2: 1 service Node (paymentservice) ──────────────
-          # `mode: observe` — baseline đo local 2026-07-24 (đúng lệnh gate):
-          # ~30 CVE THẬT (protobufjs 1C+5H · tar 1C+5H · minimatch 3H ·
-          # form-data/brace-expansion/propagator-jaeger 1H). Vào thẳng enforce =
-          # đỏ ngay commit onboard, lẫn "gate bắt CVE thật" với "wiring hỏng".
-          # ⚠️ CỐ Ý chưa vá ở commit này dù ĐÃ biết cách vá: onboard-observe cho
-          # ta đọc baseline THẬT trên CI trước — nhất là `trivy image` (lớp OS
-          # alpine + thứ nướng vào image mà `trivy fs` local KHÔNG thấy, đúng bài
-          # CVE-2026-39822 của lô Go). Vá mù theo `trivy fs` là đúng cái sai mà
-          # I-029 dạy. Vá ở 3c-1, flip enforce ở 3c-2 sau khi đọc image scan.
+          # `mode: enforce` từ EXP-3c-2 — cùng vòng observe->vá->đọc->enforce như
+          # lô Go, nhưng lô này còn dạy một bài SCA không thấy được:
           #
-          # `sast: "off"` — Node nhưng KHÁC currencyservice: currency là 1 trong
-          # 2 service TA NHẬN NUÔI (sast on); payment là code Google ta chỉ đưa
-          # vào chuỗi build+ký, không tuyên bố quyền tác giả. Cùng lằn ranh với
-          # 3 service Go.
+          #   EXP-3c (observe)   gate đo: 32 SCA / 41 image. Chênh 9 = 5 package
+          #                      (underscore/lodash/tmp/linkify-it) mà `npm install`
+          #                      kéo về NGOÀI lockfile -> `trivy fs` MÙ, chỉ image
+          #                      scan thấy. Thủ phạm CVE = @google-cloud/profiler
+          #                      + exporter-otlp-grpc, trùng currencyservice.
+          #   EXP-3c-1a          vá dep: gỡ profiler + override + `npm install` ->
+          #                      `npm ci` (buộc image == lockfile, dọn 5 image-
+          #                      only). run 30047506307: image 41 -> 0. Observe.
+          #   EXP-3c-1b          harden: alpine -> distroless nonroot. run
+          #                      30048354075: image vẫn 0 — nhưng giờ "0" là nhờ
+          #                      .trivyignore suppress 6 libssl3, KHÁC 3c-1a (0
+          #                      thật). Observe.
+          #   EXP-3c-2 (đây)     đọc trivy-image=0 ở cả hai run -> enforce.
+          #
+          # ⚠️ Bài của lô này (I-030): `npm install` phá vỡ giả định của SCA — nó
+          # cài package ngoài lockfile nên `trivy fs` (đọc lock) báo sạch hơn
+          # image THẬT. `npm ci` mới khiến lock == artifact. "Gate có đọc được
+          # thứ nó quét không" (I-027) ở tầng sâu hơn: thứ nó đọc (lock) có phản
+          # ánh đúng artifact (image) không.
+          #
+          # `sast: "off"` — payment là code Google (như 3 Go), ta đưa vào chuỗi
+          # build+ký nhưng không tuyên bố quyền tác giả. currency `sast: on` vì
+          # là 1 trong 2 service TA NHẬN NUÔI.
           - service: paymentservice
             context: src/paymentservice
             dockerfile: src/paymentservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
 
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
