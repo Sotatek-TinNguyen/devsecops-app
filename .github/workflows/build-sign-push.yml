@@ -260,6 +260,44 @@ jobs:
             mode: enforce
             sast: "off"
 
+          # ── EXPAND lô 3: 3 service Python ─────────────────────────────
+          # `mode: observe` — baseline đo local 2026-07-24 (đúng lệnh gate), cả 3
+          # đều có HIGH fixable:
+          #   emailservice          pyasn1 3H + urllib3 2H  (5)
+          #   recommendationservice pyasn1 3H + urllib3 2H  (5, y HỆT email —
+          #                         chung requirements)
+          #   shoppingassistant     21: cryptography · langchain-core · langsmith
+          #                         · pillow (10H!) · pyasn1 · urllib3 — stack
+          #                         langchain dày, giống currency/payment ở chỗ
+          #                         hệ sinh thái lớn = bề mặt CVE lớn.
+          # Onboard observe TRƯỚC để đọc baseline THẬT trên CI (nhất là image
+          # scan — lớp OS alpine/slim mà `trivy fs` mù), rồi vá ở 3d-1, flip
+          # enforce ở 3d-2. KHÔNG vá mù theo `trivy fs` local (I-029/I-030).
+          #
+          # `sast: "off"` — code Google (như 3 Go + payment). SAST là claim về
+          # code TA viết; ta chỉ đưa 3 service này vào chuỗi build+ký.
+          #
+          # 3 đứa CÙNG hình dạng (multi-stage python, `pip install
+          # requirements.txt`, COPY site-packages, ENTRYPOINT python) nên gộp 1
+          # commit onboard — đỏ thì đỏ cùng nguyên nhân. email/recommendation
+          # base `alpine`, shoppingassistant base `slim` (Debian) — khác biệt đó
+          # để 3d-1 harden xử, onboard chưa đụng.
+          - service: emailservice
+            context: src/emailservice
+            dockerfile: src/emailservice/Dockerfile
+            mode: observe
+            sast: "off"
+          - service: recommendationservice
+            context: src/recommendationservice
+            dockerfile: src/recommendationservice/Dockerfile
+            mode: observe
+            sast: "off"
+          - service: shoppingassistantservice
+            context: src/shoppingassistantservice
+            dockerfile: src/shoppingassistantservice/Dockerfile
+            mode: observe
+            sast: "off"
+
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
     # lúc GitHub đọc `env:` toàn cục -> để trên đó lỗi ngay
     # "Unrecognized named-value: 'matrix'". Ở đây thì hợp lệ — và nhờ vậy mọi
