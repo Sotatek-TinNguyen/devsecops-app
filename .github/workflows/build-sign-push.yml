@@ -6,7 +6,10 @@
 # Đặt gate trước ký là giảm blast radius của chính hành động ký, không chỉ
 # tiết kiệm phút runner.
 #
-#   gate-common (1 lần):  gitleaks (secret)                     <- 6a  [DONE]
+# (Trạng thái từng bước KHÔNG ghi ở đây — xem docs/RoadMap.md của repo infra.
+#  Comment trong code stale nhanh hơn ta cập nhật; file này chỉ mô tả THỨ TỰ.)
+#
+#   gate-common (1 lần):  gitleaks (secret)                     <- 6a
 #   mỗi service (matrix): Semgrep (SAST) -> Trivy SCA (dep)     <- 6b
 #                         -> build -> Trivy image -> push       <- 6c
 #                         -> cosign sign -> syft SBOM + attest  <- 6d
@@ -245,4 +248,57 @@ jobs:
           cosign verify \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.push.outputs.ref }}"
+
+      # ── 6d: SBOM KÝ ĐƯỢC ─────────────────────────────────────────────
+      # Chữ ký ở trên trả lời "AI build cái này". SBOM trả lời "TRONG NÀY CÓ GÌ".
+      # Thiếu vế hai thì hôm CVE mới nổ, câu "image đang chạy có dính không?"
+      # chỉ trả lời được bằng cách build lại rồi quét — tức là ĐOÁN về quá khứ,
+      # trên một image có thể không tái lập được (xem I-024 build chưa reproducible).
+      #
+      # `cosign attest` KHÁC `cosign attach sbom`: attach chỉ ĐÍNH KÈM file
+      # (không ai ký, ai sửa cũng được, không có bằng chứng nguồn gốc); attest
+      # bọc SBOM trong in-toto attestation rồi KÝ + ghi Rekor -> SBOM thành lời
+      # khai CÓ CHỮ KÝ, gắn cứng vào DIGEST. Đây là thứ Kyverno ở P3 kiểm được
+      # (`verifyImages` đọc được cả signature lẫn attestation).
+      - name: Install syft (pin 1.49.0)
+        run: |
+          set -euo pipefail
+          SYFT_VERSION=1.49.0
+          curl -sSfL -o syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf syft.tar.gz syft
+          sudo install -m 0755 syft /usr/local/bin/syft
+          syft version
+
+      # Nguồn quét = IMAGE, không phải source tree: SBOM phải kê thứ THẬT SỰ nằm
+      # trong artifact (gồm cả package của lớp base), chứ không phải thứ lockfile
+      # hứa hẹn — đúng cùng lý do 6c quét image chứ không chỉ `trivy fs`.
+      # Dùng `docker:` (image còn trong daemon local sau push) thay vì `registry:`
+      # -> khỏi pull lại, khỏi phụ thuộc syft có đọc được token ECR hay không.
+      # Cùng digest = cùng bytes nên SBOM không đổi; và subject của attestation
+      # vẫn là DIGEST ở step dưới, không phải cái tag ta quét.
+      - name: Generate SBOM (SPDX-JSON)
+        run: |
+          set -euo pipefail
+          syft scan "docker:${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}" \
+            -o spdx-json="sbom-${SERVICE}.spdx.json"
+          # Chặn SBOM RỖNG đi tiếp: file 0 package vẫn ký được -> attestation
+          # hợp lệ về mặt mật mã nhưng nội dung vô nghĩa. Thà đỏ ở đây còn hơn
+          # ký một lời khai trống rồi tin vào nó ở P3.
+          jq -e '.packages | length > 0' "sbom-${SERVICE}.spdx.json" > /dev/null
+          echo "SBOM: $(jq '.packages | length' "sbom-${SERVICE}.spdx.json") packages"
+
+      # Ký SBOM và gắn vào DIGEST (không phải tag).
+      # KHÔNG dùng `--replace`: nó xoá-rồi-ghi-lại tag `sha256-<digest>.att`, mà
+      # ECR đang IMMUTABLE -> bị từ chối. Mỗi commit ra digest mới nên tag .att
+      # luôn mới, không đụng nhau; muốn chạy lại trên cùng code thì
+      # `git commit --allow-empty` (cùng cách xử như push image ở 6c).
+      # `--type spdxjson` phải KHỚP TỪNG KÝ TỰ với `--type` ở 6e verify-attestation
+      # — verify khớp theo predicateType, lệch một ký tự là 6e đỏ.
+      - name: Attest SBOM (keyless)
+        run: |
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate "sbom-${SERVICE}.spdx.json" \
             "${{ steps.push.outputs.ref }}"
