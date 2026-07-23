@@ -172,6 +172,50 @@ jobs:
             mode: enforce
             sast: "on"
 
+          # ── EXPAND lô 1: 3 service Go ────────────────────────────────
+          # Cùng hình dạng tuyệt đối với nhau (builder golang-alpine ->
+          # distroless/static, `COPY go.mod go.sum` rồi `COPY . .`, context =
+          # thư mục service) -> gộp 1 commit được: nếu đỏ thì đỏ vì CÙNG một
+          # nguyên nhân, vẫn quy được. cartservice/adservice lệch chuẩn nên
+          # tách commit riêng.
+          #
+          # `sast: "off"` — KHÔNG phải để cho dễ. Semgrep là claim về code TÔI
+          # viết; 3 service này là code Google, ta chưa nhận trách nhiệm sửa nó
+          # thì cũng không đi tuyên bố thay. Trivy/gitleaks thì vẫn chạy đủ:
+          # chúng nói về ARTIFACT ta build và ký, không phải về quyền tác giả.
+          #
+          # `mode: observe` — baseline đo local TRƯỚC khi push (đúng lệnh gate,
+          # DB fresh), cả 3 đều CÓ HIGH fixable:
+          #   checkoutservice  x/crypto v0.51.0 -> 0.52.0   (9 CVE)
+          #                    grpc     v1.82.0 -> 1.82.1    (GHSA-hrxh-6v49-42gf)
+          #   frontend         grpc     v1.82.0 -> 1.82.1    (nt)
+          #   shippingservice  grpc     v1.80.0 -> 1.82.1    (nt)
+          # Vào thẳng `enforce` là 3 leg đỏ ngay từ commit onboard -> không phân
+          # biệt được "gate bắt CVE thật" với "wiring hỏng". Observe cho ta tách
+          # đôi: commit này chỉ trả lời "đường ống có chạy cho service mới
+          # không", việc vá là commit sau, rồi mới đổi sang enforce.
+          #
+          # ⚠️ Đáng chú ý hơn con số: GHSA-hrxh-6v49-42gf CHÍNH LÀ CVE đã vá cho
+          # productcatalogservice ở 6b. Nó vẫn còn ở đây vì mỗi service có
+          # `go.mod` RIÊNG — monorepo không có nghĩa là chung dependency tree.
+          # **Vá một service không vá cả đội hình.** Đây đúng là thứ chỉ lộ ra
+          # khi quét từng artifact một, không phải quét repo một lượt.
+          - service: checkoutservice
+            context: src/checkoutservice
+            dockerfile: src/checkoutservice/Dockerfile
+            mode: observe
+            sast: "off"
+          - service: frontend
+            context: src/frontend
+            dockerfile: src/frontend/Dockerfile
+            mode: observe
+            sast: "off"
+          - service: shippingservice
+            context: src/shippingservice
+            dockerfile: src/shippingservice/Dockerfile
+            mode: observe
+            sast: "off"
+
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
     # lúc GitHub đọc `env:` toàn cục -> để trên đó lỗi ngay
     # "Unrecognized named-value: 'matrix'". Ở đây thì hợp lệ — và nhờ vậy mọi
