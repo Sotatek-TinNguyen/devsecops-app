@@ -184,36 +184,47 @@ jobs:
           # thì cũng không đi tuyên bố thay. Trivy/gitleaks thì vẫn chạy đủ:
           # chúng nói về ARTIFACT ta build và ký, không phải về quyền tác giả.
           #
-          # `mode: observe` — baseline đo local TRƯỚC khi push (đúng lệnh gate,
-          # DB fresh), cả 3 đều CÓ HIGH fixable:
-          #   checkoutservice  x/crypto v0.51.0 -> 0.52.0   (9 CVE)
-          #                    grpc     v1.82.0 -> 1.82.1    (GHSA-hrxh-6v49-42gf)
-          #   frontend         grpc     v1.82.0 -> 1.82.1    (nt)
-          #   shippingservice  grpc     v1.80.0 -> 1.82.1    (nt)
-          # Vào thẳng `enforce` là 3 leg đỏ ngay từ commit onboard -> không phân
-          # biệt được "gate bắt CVE thật" với "wiring hỏng". Observe cho ta tách
-          # đôi: commit này chỉ trả lời "đường ống có chạy cho service mới
-          # không", việc vá là commit sau, rồi mới đổi sang enforce.
+          # `mode: enforce` từ EXP-3b-2 — vòng observe->enforce đã ĐI HẾT, ghi lại
+          # nguyên vòng vì đây mới là thứ chứng minh `observe` là bước quá độ chứ
+          # không phải chỗ giấu nợ:
           #
-          # ⚠️ Đáng chú ý hơn con số: GHSA-hrxh-6v49-42gf CHÍNH LÀ CVE đã vá cho
-          # productcatalogservice ở 6b. Nó vẫn còn ở đây vì mỗi service có
-          # `go.mod` RIÊNG — monorepo không có nghĩa là chung dependency tree.
-          # **Vá một service không vá cả đội hình.** Đây đúng là thứ chỉ lộ ra
-          # khi quét từng artifact một, không phải quét repo một lượt.
+          #   EXP-3a (observe)  gate đo được: checkout 10 SCA / 11 image,
+          #                     frontend 1/2, shipping 1/2. Trong đó
+          #                     GHSA-hrxh-6v49-42gf (grpc) CHÍNH LÀ CVE đã vá cho
+          #                     productcatalogservice ở 6b — mỗi service có
+          #                     `go.mod` RIÊNG nên **vá một service không vá cả
+          #                     đội hình** (I-029). Monorepo != chung dep tree.
+          #   EXP-3b-1          vá: grpc 1.82.1 + x/crypto 0.52.0 + builder
+          #                     golang 1.26.5 + base :nonroot@sha256 (khoảng
+          #                     trống 5a). Vẫn observe.
+          #   EXP-3b-2 (đây)    run 30022514990: **13/13 category = 0**, gồm cả 3
+          #                     ô trivy-image. Lật enforce trên BẰNG CHỨNG, không
+          #                     phải trên niềm tin.
+          #
+          # ⚠️ Vì sao phải chờ CI mới lật được, dù local đã 0: `trivy fs` đọc
+          # source nên KHÔNG BAO GIỜ thấy CVE-2026-39822 (Go stdlib biên dịch vào
+          # binary). Digest sai hay toolchain không lên 1.26.5 thì local vẫn ra 0
+          # y hệt. Chỉ `trivy-image-*` phân biệt được. **Gate nào không đọc được
+          # thứ nó định quét thì con số 0 của nó không có nghĩa** (I-027).
+          #
+          # `sast` vẫn "off": ta đã vá dependency và Dockerfile của 3 service này,
+          # nhưng KHÔNG viết code Go của chúng. Ký artifact là bảo chứng về
+          # artifact; chạy SAST rồi tuyên bố code sạch là claim về quyền tác giả.
+          # Hai việc khác nhau, đừng nhập một.
           - service: checkoutservice
             context: src/checkoutservice
             dockerfile: src/checkoutservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
           - service: frontend
             context: src/frontend
             dockerfile: src/frontend/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
           - service: shippingservice
             context: src/shippingservice
             dockerfile: src/shippingservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
 
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
