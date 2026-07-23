@@ -227,6 +227,27 @@ jobs:
             mode: enforce
             sast: "off"
 
+          # ── EXPAND lô 2: 1 service Node (paymentservice) ──────────────
+          # `mode: observe` — baseline đo local 2026-07-24 (đúng lệnh gate):
+          # ~30 CVE THẬT (protobufjs 1C+5H · tar 1C+5H · minimatch 3H ·
+          # form-data/brace-expansion/propagator-jaeger 1H). Vào thẳng enforce =
+          # đỏ ngay commit onboard, lẫn "gate bắt CVE thật" với "wiring hỏng".
+          # ⚠️ CỐ Ý chưa vá ở commit này dù ĐÃ biết cách vá: onboard-observe cho
+          # ta đọc baseline THẬT trên CI trước — nhất là `trivy image` (lớp OS
+          # alpine + thứ nướng vào image mà `trivy fs` local KHÔNG thấy, đúng bài
+          # CVE-2026-39822 của lô Go). Vá mù theo `trivy fs` là đúng cái sai mà
+          # I-029 dạy. Vá ở 3c-1, flip enforce ở 3c-2 sau khi đọc image scan.
+          #
+          # `sast: "off"` — Node nhưng KHÁC currencyservice: currency là 1 trong
+          # 2 service TA NHẬN NUÔI (sast on); payment là code Google ta chỉ đưa
+          # vào chuỗi build+ký, không tuyên bố quyền tác giả. Cùng lằn ranh với
+          # 3 service Go.
+          - service: paymentservice
+            context: src/paymentservice
+            dockerfile: src/paymentservice/Dockerfile
+            mode: observe
+            sast: "off"
+
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
     # lúc GitHub đọc `env:` toàn cục -> để trên đó lỗi ngay
     # "Unrecognized named-value: 'matrix'". Ở đây thì hợp lệ — và nhờ vậy mọi
