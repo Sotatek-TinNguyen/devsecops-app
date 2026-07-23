@@ -302,3 +302,51 @@ jobs:
             --type spdxjson \
             --predicate "sbom-${SERVICE}.spdx.json" \
             "${{ steps.push.outputs.ref }}"
+
+      # ── 6e: SOI LẠI CHÍNH THỨ VỪA KÝ ─────────────────────────────────
+      # Cùng lý do "Verify signature" tồn tại ở 6c: lời khai chưa ai kiểm thì
+      # chưa phải bằng chứng. Ở đây kiểm 3 tầng, mỗi tầng bịt một cách gian:
+      #
+      #   (1) chữ ký trên attestation hợp lệ + DANH TÍNH đúng workflow của repo
+      #       này  -> chặn "ai đó cũng ký được rồi đính vào digest của tôi".
+      #   (2) --type spdxjson  -> chặn "có attestation NÀO ĐÓ là coi như đạt".
+      #       Thiếu cờ này, một predicate loại khác vẫn làm verify xanh: ta sẽ
+      #       tin mình có SBOM trong khi thứ đính kèm là cái khác hẳn.
+      #   (3) GIẢI MÃ payload rồi ĐỐI CHIẾU với file SBOM trên đĩa -> chặn
+      #       "verify xanh nhưng nội dung rỗng/không phải cái ta vừa sinh".
+      #       Đây là chỗ nhiều pipeline dừng quá sớm: cosign chỉ nói "có chữ ký
+      #       hợp lệ", KHÔNG nói "bên trong đúng thứ anh nghĩ".
+      #
+      # (Kiểm NỘI DUNG theo chính sách — vd "cấm license GPL" — là `--policy`
+      #  CUE/Rego, để dành P5 hardening.)
+      - name: Verify attestation
+        run: |
+          set -euo pipefail
+          # stdout = DSSE envelope (JSON); stderr = dòng xác nhận của cosign,
+          # cố ý KHÔNG nuốt để log còn đọc được.
+          ATT_JSON=$(cosign verify-attestation \
+            --type spdxjson \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.push.outputs.ref }}")
+
+          # `jq -s` để phòng trường hợp có nhiều envelope trên stdout; lấy cái đầu.
+          PAYLOAD=$(printf '%s' "$ATT_JSON" | jq -rs '.[0].payload' | base64 -d)
+
+          # `(.Data // .)` = bóc vỏ nếu có, không thì dùng thẳng. cosign gói
+          # predicate SBOM tuỳ phiên bản: có bản đặt SPDX doc ở `.predicate`,
+          # có bản bọc thêm `.predicate.Data`. Viết chịu được CẢ HAI rẻ hơn
+          # nhiều so với đoán đúng một dạng — và không phụ thuộc version cosign.
+          # (Nếu đoán sai: `null | length` = 0, lọt qua `set -e`, chết ở phép so
+          #  sánh dưới dạng "0 gói khác 65 gói" -> đọc nhầm thành lệch NỘI DUNG
+          #  trong khi thật ra chỉ là lệch HÌNH DẠNG. Bẫy này khó nhìn ra.)
+          PKGS_ATT=$(printf '%s' "$PAYLOAD" | jq '.predicate | (.Data // .) | .packages | length')
+          PKGS_LOCAL=$(jq '.packages | length' "sbom-${SERVICE}.spdx.json")
+
+          if [ "$PKGS_ATT" != "$PKGS_LOCAL" ]; then
+            echo "::error::SBOM trong attestation ($PKGS_ATT gói) KHÁC SBOM vừa sinh ($PKGS_LOCAL gói)"
+            # In cấu trúc statement để lần sau debug 1 lượt, khỏi đoán.
+            printf '%s' "$PAYLOAD" | jq '{predicateType, subject, predicate_keys: (.predicate | keys)}'
+            exit 1
+          fi
+          echo "Attestation khớp: $PKGS_ATT gói, predicateType=$(printf '%s' "$PAYLOAD" | jq -r .predicateType)"
