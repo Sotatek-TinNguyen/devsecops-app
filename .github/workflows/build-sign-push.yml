@@ -26,9 +26,13 @@ name: build-sign-push
 on:
   push:
     branches: [main]
+    # EXPAND: nới từ 2 service cụ thể sang `src/**`. Để nguyên thì sau này push
+    # sửa adservice sẽ KHÔNG kích CI — im lặng, không báo lỗi, chỉ là gate
+    # không bao giờ chạy. Đổi lại: matrix build MỌI service trên MỌI thay đổi
+    # trong src/ (lọc động `dorny/paths-filter` vẫn đang hoãn) -> tốn runner,
+    # chấp nhận ở lab.
     paths:
-      - "src/productcatalogservice/**"
-      - "src/currencyservice/**"
+      - "src/**"
       - ".github/workflows/build-sign-push.yml"
   workflow_dispatch:
 
@@ -134,8 +138,39 @@ jobs:
       # một run, tức gate chặn CHỌN LỌC đúng service bẩn. fail-fast: true giết
       # mất đúng cái bằng chứng đó, chỉ còn "pipeline chết" — vô nghĩa.
       fail-fast: false
+      # EXPAND: `service: [a, b]` -> `include:` để mỗi service mang THAM SỐ
+      # RIÊNG. Bắt buộc vì các service không cùng hình dạng: cartservice để
+      # Dockerfile ở `src/cartservice/src/` và `COPY cartservice.csproj .` nên
+      # build context phải là thư mục con đó, không phải `src/cartservice`.
+      #
+      # `mode` là CHUỖI, cố ý KHÔNG dùng boolean. Với boolean, một giá trị lỡ
+      # thành chuỗi "false" sẽ được GitHub coi là TRUTHY -> bật gate ở service
+      # đang định observe (hoặc ngược lại), và sai kiểu đó KHÔNG hiện ra ở đâu
+      # cả. So sánh chuỗi `mode == 'observe'` thì không có vùng xám nào.
+      #   enforce = CVE chặn merge/push (chuẩn của 2 service template)
+      #   observe = vẫn quét + vẫn đẩy SARIF lên tab Security, nhưng KHÔNG chặn
+      #
+      # ⚠️ Nói thẳng cái giá của `observe`: image dính CVE VẪN được push và VẪN
+      # được ký. Chữ ký nói "đây đúng là thứ CI của tôi build", nó KHÔNG nói
+      # "thứ này an toàn". Đây là bước quá độ có chủ đích, không phải mặc định
+      # vĩnh viễn — mỗi service dọn xong thì đổi sang `enforce`.
+      #
+      # `sast` tách riêng khỏi `mode`: ký một artifact là bảo chứng về ARTIFACT;
+      # chạy SAST và tuyên bố code sạch là claim về CODE TÔI VIẾT. Ta không viết
+      # 9 service kia -> không đi tuyên bố thay Google. Cũng dùng chuỗi on/off
+      # vì đúng cái bẫy truthiness ở trên.
       matrix:
-        service: [productcatalogservice, currencyservice]
+        include:
+          - service: productcatalogservice
+            context: src/productcatalogservice
+            dockerfile: src/productcatalogservice/Dockerfile
+            mode: enforce
+            sast: "on"
+          - service: currencyservice
+            context: src/currencyservice
+            dockerfile: src/currencyservice/Dockerfile
+            mode: enforce
+            sast: "on"
 
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
     # lúc GitHub đọc `env:` toàn cục -> để trên đó lỗi ngay
@@ -190,10 +225,18 @@ jobs:
       # (rule/DB đã cache nên lượt 2 nhanh) — chấp nhận ở 2 service; lúc expand
       # 11 service thì đây là chỗ đầu tiên phải tối ưu.
       - name: Semgrep SARIF (report)
+        if: matrix.sast == 'on'
         run: semgrep scan --config p/ci --severity ERROR --metrics off --sarif --output semgrep.sarif "src/${SERVICE}"
 
+      # `continue-on-error` là CÁCH DUY NHẤT bật/tắt chặn mà KHÔNG đụng vào
+      # dòng lệnh: lệnh giữ nguyên byte cho mọi service, chỉ hậu quả của exit
+      # code là đổi. Nếu thay bằng cách ghép cờ `--error` theo điều kiện thì
+      # mỗi service chạy một lệnh khác nhau -> lúc debug không còn biết đang so
+      # sánh cái gì với cái gì.
       - name: Semgrep (SAST)
         id: semgrep
+        if: matrix.sast == 'on'
+        continue-on-error: ${{ matrix.mode == 'observe' }}
         run: semgrep scan --config p/ci --severity ERROR --error --metrics off "src/${SERVICE}"
 
       # Guard viết dài dòng CÓ LÝ DO: `always()` một mình sẽ chạy step này kể cả
@@ -236,6 +279,7 @@ jobs:
 
       - name: Trivy SCA (dependencies)
         id: sca
+        continue-on-error: ${{ matrix.mode == 'observe' }}
         run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "src/${SERVICE}"
 
       - name: Upload Trivy SCA SARIF
@@ -278,7 +322,11 @@ jobs:
           # ECR đang IMMUTABLE: push LẠI cùng tag sẽ bị từ chối (chống tag-swap,
           # không phải lỗi). Chạy lại trên cùng code: `git commit --allow-empty`.
           TAG="${GITHUB_SHA::12}"
-          docker build -t "$IMAGE:$TAG" "src/${SERVICE}"
+          # `-f` + context tách rời: KHÔNG suy ra được từ tên service. cartservice
+          # có Dockerfile ở src/cartservice/src/ và `COPY cartservice.csproj .`
+          # -> context phải trỏ đúng thư mục chứa csproj, sai là build vỡ ở dòng
+          # COPY chứ không phải ở chỗ dễ nhìn.
+          docker build -t "$IMAGE:$TAG" -f "${{ matrix.dockerfile }}" "${{ matrix.context }}"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
 
@@ -292,6 +340,7 @@ jobs:
 
       - name: Trivy image scan
         id: imagescan
+        continue-on-error: ${{ matrix.mode == 'observe' }}
         run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
 
       # Đây là SARIF nói về ARTIFACT (lớp OS + base), khác trivy-sca nói về
