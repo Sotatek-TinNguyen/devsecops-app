@@ -342,10 +342,18 @@ jobs:
             dockerfile: src/adservice/Dockerfile
             mode: observe
             sast: "off"
+          # cartservice → enforce (3f): run 30060905472 image=0. Enforce trên
+          # IMAGE scan ĐÃ verify-không-mù (SBOM 41 gói > chiseled OS-only ~10 →
+          # syft catalog .NET deps → Trivy image cũng đọc `.deps.json`), TUYỆT
+          # ĐỐI KHÔNG trên SCA=0 (số MÙ vì thiếu lockfile). Đã harden sẵn
+          # (USER 1000 + chiseled) nên không cần commit harden/vá.
+          # ⚠️ SCA vẫn MÙ: nếu sau này sinh `packages.lock.json` (pending #7) để
+          # un-blind, SCA có thể lộ CVE → phải làm lúc service ở observe hoặc
+          # chấp nhận đưa tạm về observe, kẻo đỏ service đã enforce.
           - service: cartservice
             context: src/cartservice/src
             dockerfile: src/cartservice/src/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
 
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
