@@ -40,5 +40,13 @@ FROM eclipse-temurin:25.0.3_9-jre-alpine@sha256:28db6fdf60e38945e43d840c0333aeae
 WORKDIR /app
 COPY --from=builder /app .
 
+# nonroot cho P5 PodSecurity `restricted` (upstream chạy root — thứ P5 chặn).
+# UID dạng SỐ vì `runAsNonRoot: true` KHÔNG resolve username, chỉ đọc số. Không
+# tạo user: JVM + gRPC ở đây không gọi getpwuid. `/app` COPY từ builder là
+# root:root 0755 → nonroot ĐỌC + EXECUTE được (AdService là start script + JAR).
+# 9555 > 1024 → bind được không cần NET_BIND_SERVICE. JVM ghi tạm vào /tmp
+# (1777, nonroot ghi được); không ghi $HOME.
+USER 65532:65532
+
 EXPOSE 9555
 ENTRYPOINT ["/app/build/install/hipstershop/bin/AdService"]
