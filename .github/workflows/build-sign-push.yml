@@ -55,8 +55,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   gate-common:
     name: gate-common (gitleaks)
-    #runs-on: ubuntu-latest
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    #runs-on: self-hosted
     # Least privilege TẦNG JOB: job này chỉ checkout để quét, KHÔNG cần OIDC.
     # Khai `contents: read` -> id-token tụt về NONE cho RIÊNG job này (perms
     # tầng job THAY THẾ tầng workflow, không cộng dồn) -> gate-common không hề
@@ -126,8 +126,8 @@ jobs:
     # Tên có ${{ matrix.service }} -> UI hiện 2 dòng phân biệt được, thay vì
     # hai job trùng tên. Quan trọng lúc debug và lúc chụp màn hình làm portfolio.
     name: build-sign-push (${{ matrix.service }})
-    #runs-on: ubuntu-latest
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    #runs-on: self-hosted
     # Không build/ký nếu secret scan chưa xanh. gate-common đỏ -> CẢ hai leg
     # matrix bị skip; không gì được build, push, hay ghi vào Rekor.
     needs: gate-common
