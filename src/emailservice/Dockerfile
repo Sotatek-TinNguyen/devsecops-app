@@ -50,5 +50,13 @@ COPY --from=builder /usr/local/lib/python3.14/ /usr/local/lib/python3.14/
 # Add the application
 COPY . .
 
+# nonroot: upstream chạy root (không set USER) — thứ P5 PodSecurity `restricted`
+# sẽ chặn. UID dạng SỐ vì `runAsNonRoot: true` KHÔNG resolve username, chỉ đọc
+# số. Không tạo user trong /etc/passwd: Python + gRPC ở đây không gọi getpwuid;
+# `PYTHONDONTWRITEBYTECODE=1` (đặt trên) đã tắt ghi __pycache__ nên nonroot
+# không vấp quyền ghi site-packages. Site-packages + code là root:root 0755 →
+# nonroot ĐỌC được. 8080 > 1024 → bind được không cần NET_BIND_SERVICE.
+USER 65532:65532
+
 EXPOSE 8080
 ENTRYPOINT [ "python", "email_server.py" ]

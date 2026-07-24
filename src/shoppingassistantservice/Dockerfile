@@ -44,4 +44,16 @@ COPY . .
 ENV PORT="8080"
 EXPOSE 8080
 
+# Tắt ghi bytecode: chạy nonroot thì site-packages (root:root) không ghi được,
+# set DONTWRITE để Python khỏi cố + khỏi warning. email/recommendation có sẵn
+# dòng này từ upstream; shoppingassistant thiếu nên thêm cùng lúc harden.
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# nonroot cho P5 PodSecurity `restricted` (upstream chạy root). UID SỐ vì
+# `runAsNonRoot` chỉ đọc số. Không tạo user: code không gọi getpwuid. 8080 >
+# 1024 → bind được. ⚠️ langchain/google libs CÓ THỂ ghi cache vào $HOME lúc
+# chạy — chưa lộ vì service optional (aiohttp còn thiếu, xem "Việc đang TREO");
+# nếu P3 deploy thật mà vấp $HOME thì set HOME=/tmp hoặc mount emptyDir.
+USER 65532:65532
+
 ENTRYPOINT ["python", "shoppingassistantservice.py"]

@@ -52,4 +52,9 @@ COPY . .
 ENV PORT="8080"
 EXPOSE 8080
 
+# nonroot cho P5 PodSecurity `restricted` (upstream chạy root). UID SỐ vì
+# `runAsNonRoot` chỉ đọc số. `PYTHONDONTWRITEBYTECODE=1` (trên) đã tắt ghi
+# bytecode nên nonroot không vấp quyền. 8080 > 1024 → bind được.
+USER 65532:65532
+
 ENTRYPOINT ["python", "recommendation_server.py"]
