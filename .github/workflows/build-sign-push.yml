@@ -311,6 +311,43 @@ jobs:
             mode: enforce
             sast: "off"
 
+          # ── EXPAND lô 4: 2 service LỆCH CHUẨN (adservice Gradle, cartservice
+          #    .NET) — I-027: cả hai THIẾU lockfile nên Trivy SCA MÙ ────────────
+          # Onboard `observe`. KHÁC 3 lô trước ở chỗ: baseline observe ở đây là
+          # một PHÉP THỬ, không chỉ đếm CVE. Câu hỏi phải trả lời trước khi tin
+          # bất kỳ số 0 nào: "gate có ĐỌC ĐƯỢC artifact không?" (I-027, giờ soi
+          # lên chính image gate).
+          #   - SCA (`trivy fs`) CHẮC CHẮN mù: không lockfile thì không có gì để
+          #     đọc → nó sẽ ra 0 vì KHÔNG THẤY, không phải vì sạch.
+          #   - image (`trivy image`) thì đọc dep ĐÃ BIÊN DỊCH trong artifact:
+          #     cartservice `.deps.json` (do `dotnet publish` ship) + adservice
+          #     JAR (do `installDist`). KHÔNG cần lockfile.
+          # Cách kiểm image gate có tự mù không: đọc SBOM (bước verify-attestation
+          # đã decode + đếm package) — nếu SBOM liệt kê Grpc.AspNetCore/Npgsql
+          # (cart) và JAR hipstershop (ad) thì image analyzer THẤY dep → 0 của nó
+          # có nghĩa. Nếu SBOM chỉ có package OS/base → image cũng mù → lúc đó
+          # lockfile mới là bắt buộc (cài dotnet/gradle SDK).
+          #
+          # ⚠️ Vì thế: khi flip enforce (3e/3f-2), gate trên IMAGE scan ĐÃ verify-
+          # không-mù, TUYỆT ĐỐI KHÔNG trên SCA=0 (số mù). Và ghi rõ trong RoadMap
+          # "SCA=0 là MÙ, không phải SẠCH".
+          #
+          # `sast: "off"` — code Google. cartservice ĐÃ nonroot (USER 1000 +
+          # chiseled base) — không cần harden. adservice chạy ROOT → cần commit
+          # harden riêng. cartservice Dockerfile ở `src/cartservice/src/` +
+          # `COPY cartservice.csproj .` → context là thư mục con đó, không phải
+          # `src/cartservice`.
+          - service: adservice
+            context: src/adservice
+            dockerfile: src/adservice/Dockerfile
+            mode: observe
+            sast: "off"
+          - service: cartservice
+            context: src/cartservice/src
+            dockerfile: src/cartservice/src/Dockerfile
+            mode: observe
+            sast: "off"
+
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
     # lúc GitHub đọc `env:` toàn cục -> để trên đó lỗi ngay
     # "Unrecognized named-value: 'matrix'". Ở đây thì hợp lệ — và nhờ vậy mọi
