@@ -337,10 +337,22 @@ jobs:
           # harden riêng. cartservice Dockerfile ở `src/cartservice/src/` +
           # `COPY cartservice.csproj .` → context là thư mục con đó, không phải
           # `src/cartservice`.
+          # adservice → enforce (3e-2): run 30063284772 image=0 (netty family
+          # force 4.1.136 + jackson 2.22.1 + 4 OS CVE ignored). Vòng
+          # observe→vá→harden→đọc→enforce:
+          #   3ef   onboard observe; baseline image=20 (netty×7, jackson, OS×4)
+          #   3e-1  force netty family + jackson + .trivyignore OS (build vỡ lần
+          #         đầu vì tcnative sub-family lọt force → fix prefix exclude)
+          #   3e-1b nonroot
+          #   3e-2  đọc image=0 → enforce
+          # Lật trên IMAGE scan (đã verify-không-mù: 20 JAR CVE ban đầu chứng minh
+          # Trivy đọc được artifact), KHÔNG trên SCA=0 (mù, thiếu lockfile).
+          # ⚠️ SCA mù như cartservice: sinh `gradle.lockfile` (pending #7) để
+          # un-blind phải làm lúc observe, kẻo đỏ service đã enforce.
           - service: adservice
             context: src/adservice
             dockerfile: src/adservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
           # cartservice → enforce (3f): run 30060905472 image=0. Enforce trên
           # IMAGE scan ĐÃ verify-không-mù (SBOM 41 gói > chiseled OS-only ~10 →
