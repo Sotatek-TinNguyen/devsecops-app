@@ -64,8 +64,13 @@ dependencies {
 // `io.netty.*` (grpc dùng netty bên trong) → `installDist` compile sạch, nổ tận
 // P3. Vì thế ép CẢ HỌ về một version.
 //
-// EXCLUDE netty-tcnative-boringssl-static: nó là dòng 2.0.x RIÊNG (native TLS),
-// KHÔNG phải 4.1.x — ép nó về 4.1.136 là version không tồn tại → build vỡ.
+// EXCLUDE cả nhóm `netty-tcnative*`: tcnative là SUB-FAMILY RIÊNG (native TLS),
+// dòng version 2.0.x — KHÔNG phải 4.1.x. Và nó có NHIỀU artifact, không chỉ một:
+// `netty-tcnative-boringssl-static` kéo transitive `netty-tcnative-classes`
+// (cùng group io.netty). Lần đầu (fa4b3d12) chỉ loại đúng tên
+// `netty-tcnative-boringssl-static` → `netty-tcnative-classes` LỌT vào force,
+// bị ép 4.1.136.Final (không tồn tại) → BUILD VỠ ở CI. Dùng `startsWith` để loại
+// TẤT CẢ tcnative-*. Bài học: "tcnative" là một họ con, không phải một artifact.
 //
 // 4.1.133 -> 4.1.136 (latest patch CÙNG minor 4.1.x): ABI ổn định theo chính
 // sách netty. KHÔNG nhảy 4.2.x (đó là quyết định compat, không phải bump vặt).
@@ -74,7 +79,7 @@ dependencies {
 configurations.all {
     resolutionStrategy.eachDependency { details ->
         if (details.requested.group == 'io.netty'
-                && details.requested.name != 'netty-tcnative-boringssl-static') {
+                && !details.requested.name.startsWith('netty-tcnative')) {
             details.useVersion '4.1.136.Final'
             details.because 'CVE-2026-{44249,45416,50010,55831,55833,56745,59901} — force whole netty family in-minor'
         }
