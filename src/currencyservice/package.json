@@ -21,7 +21,8 @@
     "@opentelemetry/sdk-trace-base": "2.8.0",
     "@opentelemetry/sdk-node": "0.217.0",
     "pino": "10.3.1",
-    "xml2js": "0.6.2"
+    "xml2js": "0.6.2",
+    "axios": "0.21.1"
   },
   "overrides": {
     "protobufjs": "8.4.1",
