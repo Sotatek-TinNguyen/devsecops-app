@@ -282,20 +282,33 @@ jobs:
           # commit onboard — đỏ thì đỏ cùng nguyên nhân. email/recommendation
           # base `alpine`, shoppingassistant base `slim` (Debian) — khác biệt đó
           # để 3d-1 harden xử, onboard chưa đụng.
+          # ── EXPAND lô 3 → enforce (3d-2) ──────────────────────────────
+          # Cả 3 qua vòng observe→vá→harden→đọc→enforce như lô Go/Node:
+          #   3d      onboard observe; baseline 5/5/21 (SCA==image, không I-030)
+          #   3d-1a   email+recommendation: pyasn1 0.6.4 + urllib3 2.7.0
+          #   3d-1b   shoppingassistant: pillow 12.3.0 + cryptography/langchain-
+          #           core/langsmith/pyasn1/urllib3 (uv --python-platform LINUX,
+          #           không Mac — import smoke xác nhận langchain-core 1.5.1
+          #           không break API)
+          #   3d-1c   nonroot cả 3
+          #   3d-2    run 30056224745: 6 category Python = 0 → enforce
+          # ⚠️ shoppingassistant vẫn còn nợ RUNTIME `aiohttp` (pre-existing, xem
+          # "Việc đang TREO"): enforce ở đây bảo chứng ARTIFACT (build+scan+ký),
+          # KHÔNG bảo chứng nó CHẠY được. Phải xử aiohttp trước khi P3 deploy.
           - service: emailservice
             context: src/emailservice
             dockerfile: src/emailservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
           - service: recommendationservice
             context: src/recommendationservice
             dockerfile: src/recommendationservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
           - service: shoppingassistantservice
             context: src/shoppingassistantservice
             dockerfile: src/shoppingassistantservice/Dockerfile
-            mode: observe
+            mode: enforce
             sast: "off"
 
     # Đặt ở tầng JOB, KHÔNG phải tầng workflow: `matrix` context chưa tồn tại
