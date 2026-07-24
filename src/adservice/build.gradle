@@ -15,8 +15,11 @@ group = "adservice"
 version = "0.1.0-SNAPSHOT"
 
 def grpcVersion = "1.82.1"
-def jacksonCoreVersion = "2.22.0"
-def jacksonDatabindVersion = "2.22.0"
+// jackson 2.22.0 -> 2.22.1: vá GHSA-r7wm-3cxj-wff9 (jackson-core async parser
+// maxNumberLength bypass). Bump core VÀ databind CÙNG lúc — jackson yêu cầu
+// core/databind cùng version, lệch nhau là bug khó thấy.
+def jacksonCoreVersion = "2.22.1"
+def jacksonDatabindVersion = "2.22.1"
 def protocVersion = "4.35.1"
 
 tasks.withType(JavaCompile) {
@@ -46,6 +49,35 @@ dependencies {
         runtimeOnly "com.fasterxml.jackson.core:jackson-core:${jacksonCoreVersion}",
                 "com.fasterxml.jackson.core:jackson-databind:${jacksonDatabindVersion}",
                 "io.netty:netty-tcnative-boringssl-static:2.0.80.Final"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Vá 7 CVE netty (netty-handler/codec/codec-http): chúng là TRANSITIVE từ
+// grpc-netty:1.82.1, kéo netty 4.1.133.Final. Nâng grpc-netty một mình không
+// đủ; phải ép netty.
+//
+// ⚠️ BẪY CHÍ MẠNG (CI KHÔNG bắt được): netty-* là một HỌ khoá version — tất cả
+// module (common/buffer/transport/codec/codec-http/handler/resolver) PHẢI cùng
+// version. Ép chỉ 3 artifact Trivy gắn cờ → skew nội bộ netty → NoSuchMethodError
+// lúc CHẠY. Không lộ ở build vì code adservice gọi `io.grpc.*`, không gọi
+// `io.netty.*` (grpc dùng netty bên trong) → `installDist` compile sạch, nổ tận
+// P3. Vì thế ép CẢ HỌ về một version.
+//
+// EXCLUDE netty-tcnative-boringssl-static: nó là dòng 2.0.x RIÊNG (native TLS),
+// KHÔNG phải 4.1.x — ép nó về 4.1.136 là version không tồn tại → build vỡ.
+//
+// 4.1.133 -> 4.1.136 (latest patch CÙNG minor 4.1.x): ABI ổn định theo chính
+// sách netty. KHÔNG nhảy 4.2.x (đó là quyết định compat, không phải bump vặt).
+// Nếu CI còn netty CVE sau 4.1.136 = fix nằm ở minor cao hơn → lúc đó mới cân.
+// ─────────────────────────────────────────────────────────────
+configurations.all {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'io.netty'
+                && details.requested.name != 'netty-tcnative-boringssl-static') {
+            details.useVersion '4.1.136.Final'
+            details.because 'CVE-2026-{44249,45416,50010,55831,55833,56745,59901} — force whole netty family in-minor'
+        }
     }
 }
 

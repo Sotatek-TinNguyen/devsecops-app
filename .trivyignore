@@ -21,3 +21,17 @@ CVE-2026-28388
 CVE-2026-28389
 CVE-2026-28390
 CVE-2026-45447
+
+# 4 CVE OS-layer của `eclipse-temurin:25.0.3_9-jre-alpine` (runtime adservice,
+# từ EXP-3e). p11-kit + libexpat — Alpine ĐÃ có bản vá (libexpat 2.8.2) nhưng
+# temurin CHƯA rebuild tag này: verify 2026-07-24 tag `25.0.3_9-jre-alpine` =
+# CÙNG digest đang pin (sha256:28db6fdf…). Ta không build base → không vá tới
+# khi upstream rebuild. Cùng dạng libssl3 ở trên. KHÁC 7 CVE netty (đã vá bằng
+# force 4.1.136 trong build.gradle) — đây là OS, không phải Java dep.
+# Vì sao KHÔNG `apk upgrade`: kéo latest OS package = phá tính tái lập của layer
+# (digest đổi mỗi build). Giữ pin + accept-with-visibility, đúng triết lý pin digest.
+# REVISIT khi temurin rebuild alpine base (hoặc bump tag Java mới hơn có vá).
+CVE-2026-2100
+CVE-2026-56131
+CVE-2026-56407
+CVE-2026-56408
