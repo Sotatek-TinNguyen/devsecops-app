@@ -453,6 +453,31 @@ jobs:
       # Pin trivy v0.72.0, tải từ release chính thức (KHÔNG `curl|sh` từ main —
       # kém sạch trong đúng project về supply-chain); tên asset đã xác minh tồn
       # tại trước khi ghi URL. Đồng bộ cách hand-install gitleaks ở 6a.
+      # ── EXP-4: cache vuln-DB (trivy-db + trivy-java-db) ─────────────
+      # Trivy kéo 2 DB từ ghcr: `trivy-db` và `trivy-java-db` (nặng, chỉ leg Java
+      # = adservice dùng — chính nó tìm ra netty/jackson JAR CVE). 11 leg pull
+      # song song mỗi run → dễ dính `TOOMANYREQUESTS` của ghcr ẩn danh. Cache cả
+      # thư mục `~/.cache/trivy` mua được ĐỘ TIN CẬY, không chỉ vài giây.
+      #
+      # KEY XOAY THEO NGÀY — đây là núm CHÍNH XÁC, không phải tối ưu vặt: key tĩnh
+      # + `--skip-db-update` sẽ ĐÓNG BĂNG DB → gate ĐÃ enforce âm thầm quét bằng DB
+      # cũ → image dính CVE mới nổ hôm nay vẫn PASS xanh (đúng bẫy I-012, tệ hơn
+      # vì lặng lẽ). Key `trivy-db-<YYYY-MM-DD>`: cùng ngày restore → Trivy thấy DB
+      # còn tươi (TTL nội bộ) → tự bỏ qua pull (không cần `--skip-db-update`);
+      # sang ngày mới key đổi → miss → pull DB mới. Cache do đó THUẦN HOÁ I-012:
+      # trong ngày kết quả gate tái lập, độ trễ CVE ≤ 1 ngày. `restore-keys` để
+      # ngày đầu chưa có cache thì mượn tạm cache hôm trước rồi Trivy tự update.
+      - name: Trivy DB cache key (rotate daily)
+        id: trivycache
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Cache Trivy vuln DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.trivycache.outputs.date }}
+          restore-keys: |
+            trivy-db-
+
       - name: Install Trivy
         run: |
           set -euo pipefail
@@ -470,13 +495,27 @@ jobs:
       # không hành động được (bẫy "đỏ vì thứ không sửa nổi") -> chính sách gate
       # = "phải áp bản vá có sẵn". CRITICAL,HIGH mới chặn. Baseline verify local
       # ĐÚNG lệnh này: exit 0 cả 2 service sau khi 6-pre dọn currencyservice.
-      - name: Trivy SCA SARIF (report)
-        run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format sarif --output trivy-sca.sarif "src/${SERVICE}"
+      # ── EXP-4: quét MỘT lần → convert HAI lần (thay vì scan 2 lượt) ──
+      # 6f-2 trước đây chạy `trivy fs` 2 lần (report + gate) để giữ NGUYÊN BYTE
+      # dòng gate — bảo hiểm lúc mới thêm gate, đỏ thì chắc chắn không do đụng
+      # ngưỡng. Giờ gate ổn định (11 service enforce xanh) nên bỏ bảo hiểm đó
+      # được. `trivy convert` đọc lại 1 file JSON và xuất SARIF HOẶC áp exit-code
+      # — verify local 0.72.0: convert honor `--exit-code` (JSON bẩn→1, sạch→0)
+      # và SARIF ra đúng 2.1.0. Lợi: đọc lockfile/filesystem CHỈ MỘT lần.
+      # Report convert đặt TRƯỚC gate convert có chủ đích: gate enforce đỏ →
+      # step sau skip, nhưng SARIF đã sinh xong → `Upload` (if:always) vẫn có
+      # file → tab Security KHÔNG trống đúng lúc có phát hiện (giữ đúng tính chất
+      # của 6f, không phải phá nó).
+      - name: Trivy SCA scan (JSON, once)
+        run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format json --output trivy-sca.json "src/${SERVICE}"
 
-      - name: Trivy SCA (dependencies)
+      - name: Trivy SCA SARIF (report, convert)
+        run: trivy convert --format sarif --output trivy-sca.sarif trivy-sca.json
+
+      - name: Trivy SCA gate (dependencies)
         id: sca
         continue-on-error: ${{ matrix.mode == 'observe' }}
-        run: trivy fs --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "src/${SERVICE}"
+        run: trivy convert --exit-code 1 trivy-sca.json
 
       - name: Upload Trivy SCA SARIF
         if: always() && (steps.sca.conclusion == 'success' || steps.sca.conclusion == 'failure')
@@ -531,13 +570,20 @@ jobs:
       # (đã sạch); khi expand 11 -> bọc step này bằng cờ `enforce` per-service
       # (model B: observe rồi enforce). DB vuln đã cache từ Trivy SCA -> không
       # tải lại 100MB.
-      - name: Trivy image SARIF (report)
-        run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format sarif --output trivy-image.sarif "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
+      # EXP-4: cũng quét-một-lần-convert-hai. Với image, unpack filesystem của
+      # image là chi phí THẬT (nặng hơn đọc lockfile) → quét 1 lần càng đáng.
+      # Cùng thứ tự: report convert TRƯỚC gate convert (SARIF luôn sẵn cho upload
+      # kể cả khi gate enforce đỏ).
+      - name: Trivy image scan (JSON, once)
+        run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format json --output trivy-image.json "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
 
-      - name: Trivy image scan
+      - name: Trivy image SARIF (report, convert)
+        run: trivy convert --format sarif --output trivy-image.sarif trivy-image.json
+
+      - name: Trivy image gate
         id: imagescan
         continue-on-error: ${{ matrix.mode == 'observe' }}
-        run: trivy image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 "${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}"
+        run: trivy convert --exit-code 1 trivy-image.json
 
       # Đây là SARIF nói về ARTIFACT (lớp OS + base), khác trivy-sca nói về
       # DEPENDENCY khai trong lockfile -> hai category riêng, đừng gộp: gộp thì
