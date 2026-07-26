@@ -730,3 +730,264 @@ jobs:
             exit 1
           fi
           echo "Attestation khớp: $PKGS_ATT gói, predicateType=$(printf '%s' "$PAYLOAD" | jq -r .predicateType)"
+
+      # ── P3-3: HẠT GIỐNG CHO BUMP ─────────────────────────────────────
+      # Đặt Ở CUỐI CÙNG là cố ý: file digest này là "giấy thông hành" của leg.
+      # Leg nào chưa đi hết build → quét → push → ký → attest → verify thì
+      # KHÔNG đẻ ra digest nào, nên repo gitops không có cách nào trỏ vào một
+      # image chưa kiểm. Thứ tự step ở đây chính là điều kiện đó, không cần
+      # thêm cờ hay điều kiện `if` nào để diễn đạt.
+      - name: Publish digest (cho job bump-gitops)
+        run: |
+          set -euo pipefail
+          DIGEST="${{ steps.push.outputs.ref }}"
+          DIGEST="${DIGEST##*@}"          # bỏ phần repo, giữ sha256:...
+          # Kiểm định dạng ở ĐÂY, nơi bash chắc chắn có ERE + interval. awk bên
+          # gitops chỉ ĐỊNH VỊ dòng, không xác thực giá trị — mỗi bên làm đúng
+          # việc mà môi trường của nó bảo đảm được.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "::error::digest sai định dạng: $DIGEST"; exit 1; }
+          printf '%s\n' "$DIGEST" > "digest-${SERVICE}.txt"
+          echo "digest cho ${SERVICE}: $DIGEST"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}
+          path: digest-${{ matrix.service }}.txt
+          retention-days: 1    # chỉ sống tới khi job bump đọc xong
+
+  # ─────────────────────────────────────────────────────────────
+  # P3-3 — BUMP DIGEST SANG REPO GITOPS
+  #
+  # Đây là chỗ ADR-0002 trả cổ tức. CI KHÔNG có, và sẽ không bao giờ có, quyền
+  # vào cluster: nó chỉ ghi một dòng digest vào repo gitops rồi dừng. ArgoCD ở
+  # trong cụm KÉO về. Token dưới đây write được ĐÚNG MỘT repo và không mở thêm
+  # bất cứ cửa nào — không AWS, không kubeconfig, không repo infra.
+  #
+  # MỘT job gom, KHÔNG phải mỗi leg tự push. Hai lý do, lý do sau quan trọng hơn:
+  #   (1) 11 leg push song song vào cùng một nhánh = tranh nhau non-fast-forward.
+  #   (2) values/dev phải là MỘT TRẠNG THÁI CI ĐÃ CHỨNG MINH CÙNG NHAU. Cả bộ
+  #       digest của fan-out được lấy từ MỘT run xanh là có chủ đích (I-033:
+  #       hỏi nguồn sinh ra artifact, đừng hỏi registry "cái nào mới nhất").
+  #       Push rời rạc từng leg sẽ biến file thành hỗn hợp digest của nhiều run
+  #       — mỗi dòng đều "thật", tổng thể là một trạng thái chưa từng tồn tại.
+  #
+  # `needs:` cho ta all-or-nothing: leg nào đỏ thì job này bị SKIP, gitops giữ
+  # nguyên digest cũ. Đúng, nhưng IM LẶNG — nên có job `bump-skipped` bên dưới
+  # để cái im lặng đó hiện ra trên trang run.
+  # ─────────────────────────────────────────────────────────────
+  bump-gitops:
+    name: bump-gitops (digest → devsecops-gitops)
+    runs-on: ubuntu-latest
+    needs: build-sign-push
+    # Least privilege tầng job, cùng nếp gate-common: khai `contents: read` ->
+    # id-token tụt về NONE cho riêng job này. Job đẩy code sang repo khác là job
+    # KHÔNG được phép xin token AWS hay ký cosign. Quyền ghi gitops không đến từ
+    # đây mà từ PAT, tách bạch hoàn toàn với quyền của workflow.
+    permissions:
+      contents: read
+    steps:
+      # THỨ TỰ CÓ CHỦ ĐÍCH: checkout repo app (không `path`, đích là gốc
+      # workspace) đi TRƯỚC, để lần checkout gitops/ sau không thể bị nó dọn.
+      # An toàn dù actions/checkout dọn workspace tới mức nào — không dựa vào
+      # một cơ chế cụ thể mà chỉ dựa vào thứ tự.
+      - name: Checkout app repo (lấy .github/bump-digest.awk)
+        uses: actions/checkout@v4
+
+      - name: Checkout gitops repo
+        uses: actions/checkout@v4
+        with:
+          repository: Sotatek-TinNguyen/devsecops-gitops
+          # PAT fine-grained: Contents Read+Write, Only select repositories =
+          # devsecops-gitops. KHÔNG cấp quyền `Workflows` -> token này bị GitHub
+          # từ chối nếu định sửa .github/workflows/** bên gitops. Tức kể cả CI
+          # bị chiếm, nó không tự cài được workflow vào repo mà ArgoCD tin.
+          token: ${{ secrets.GITOPS_BUMP_TOKEN }}
+          path: gitops
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Patch digests + ép hình dạng diff
+        run: |
+          set -euo pipefail
+          VALUES="values/dev/onlineboutique.yaml"
+          AWKF="$GITHUB_WORKSPACE/.github/bump-digest.awk"
+          cd gitops
+
+          # Kỳ vọng lấy từ FILE ĐÍCH, không hardcode danh sách service. Thêm
+          # service vào chart là tự động được đòi hỏi phải có digest — không ai
+          # phải nhớ sửa CI, và không có đường nào để quên trong im lặng.
+          #
+          # `while read` chứ không `mapfile`: mapfile cần bash >= 4, mà máy dev
+          # (macOS) còn bash 3.2. Runner có bash 5 nên mapfile chạy được — nhưng
+          # một dòng phụ đổi lấy việc Raf dry-run được ngay trên máy mình là lãi,
+          # và chính lần dry-run đó đã bắt ra cái bẫy ngay bên dưới.
+          WANT=()
+          while IFS= read -r s; do WANT+=("$s"); done < <(
+            awk '/^  [A-Za-z0-9_-]+: *$/ { s = substr($0, 3, index($0, ":") - 3) }
+                 /^ *digest:/ && s      { print s; s = "" }' "$VALUES"
+          )
+
+          # ⚠️ BẪY ĐÃ TRẢ GIÁ ĐỂ HỌC (bắt được lúc dry-run, trước khi lên CI):
+          # WANT rỗng thì MỌI service bị coi là "build nhưng không deploy" -> bỏ
+          # qua hết -> BUMPED rỗng -> vòng MISSING KHÔNG LẶP LẦN NÀO nên không
+          # báo gì -> `git diff --quiet` thấy sạch -> job kết thúc XANH với
+          # "digest không đổi". Tức bump không làm gì mà run vẫn xanh, y hệt một
+          # run thành công. Đúng họ I-027: gate mù và gate sạch cho ra cùng một
+          # màu xanh. Chặn bằng cách khẳng định thẳng cái tiền đề.
+          if [ ${#WANT[@]} -eq 0 ]; then
+            echo "::error::không đọc được service nào có 'digest:' trong $VALUES"
+            echo "::error::(format file đổi? đường dẫn sai?) — KHÔNG bump mù"
+            exit 1
+          fi
+          echo "values đang cần digest cho ${#WANT[@]} service: ${WANT[*]}"
+
+          BUMPED=()
+          for f in "$GITHUB_WORKSPACE"/digests/digest-*.txt; do
+            SVC=$(basename "$f" .txt); SVC=${SVC#digest-}
+            DIG=$(tr -d '[:space:]' < "$f")
+            [[ "$DIG" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              || { echo "::error::$SVC: digest sai định dạng ($DIG)"; exit 1; }
+
+            # THỪA thì bỏ qua — KHÔNG phải lỗi. shoppingassistantservice được
+            # build/ký/enforce đầy đủ nhưng cố ý KHÔNG deploy (I-031: thiếu
+            # aiohttp, vỡ lúc khởi động). "Được build" và "được deploy" là hai
+            # tập khác nhau, và chỗ này là nơi duy nhất điều đó lộ ra.
+            if ! printf '%s\n' "${WANT[@]}" | grep -qx "$SVC"; then
+              echo "bỏ qua $SVC (build nhưng không có trong $VALUES)"
+              continue
+            fi
+
+            awk -v svc="$SVC" -v dig="$DIG" -f "$AWKF" "$VALUES" > "$VALUES.new"
+            mv "$VALUES.new" "$VALUES"
+            BUMPED+=("$SVC")
+          done
+
+          # THIẾU thì đỏ. Đây là chiều nguy hiểm: một service đang chạy trên cụm
+          # mà không nhận digest mới của run này nghĩa là file vừa trở thành hỗn
+          # hợp nhiều run — đúng thứ bất biến "cả bộ từ MỘT run xanh" cấm.
+          MISSING=()
+          for w in "${WANT[@]}"; do
+            printf '%s\n' "${BUMPED[@]}" | grep -qx "$w" || MISSING+=("$w")
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::error::không có digest mới cho: ${MISSING[*]}"
+            exit 1
+          fi
+
+          if git diff --quiet -- "$VALUES"; then
+            echo "digest không đổi — không có gì để commit"
+            echo "BUMP_RESULT=nochange" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # HÌNH DẠNG DIFF là bất biến KIỂM ĐƯỢC, không phải điều hy vọng.
+          # File đích 43/77 dòng là comment, và comment ở đây là tài liệu thật.
+          # Ép: chỉ thay dòng (add == del), không nhiều hơn số service vừa patch,
+          # và tuyệt đối không đụng file nào khác. Công cụ có lỡ reflow/nuốt
+          # comment thì chết ở đây, trước khi kịp push.
+          ADD=$(git diff --numstat -- "$VALUES" | awk '{print $1}')
+          DEL=$(git diff --numstat -- "$VALUES" | awk '{print $2}')
+          if [ "$ADD" != "$DEL" ] || [ "$ADD" -gt "${#BUMPED[@]}" ] || [ "$ADD" -eq 0 ]; then
+            echo "::error::diff bất thường: +$ADD/-$DEL (patch ${#BUMPED[@]} service)"
+            git diff -- "$VALUES"
+            exit 1
+          fi
+          # Gộp file đã sửa (tracked) + file mới sinh (untracked) rồi so nguyên
+          # chuỗi. Không parse cột của `git status --porcelain`: cột đó đổi hình
+          # theo trạng thái staged/rename, tức là một thứ đúng-hôm-nay chứ không
+          # đúng-theo-định-nghĩa. Ở đây phải là ĐÚNG một đường dẫn, không hơn.
+          TOUCHED=$( { git diff --name-only; git ls-files --others --exclude-standard; } )
+          if [ "$TOUCHED" != "$VALUES" ]; then
+            echo "::error::đụng file ngoài dự kiến:"; printf '%s\n' "$TOUCHED"; exit 1
+          fi
+          echo "diff sạch: $ADD dòng đổi, đúng $VALUES"
+          echo "BUMP_RESULT=changed"       >> "$GITHUB_ENV"
+          echo "BUMP_SERVICES=${BUMPED[*]}" >> "$GITHUB_ENV"
+
+      - name: Commit + push
+        if: env.BUMP_RESULT == 'changed'
+        run: |
+          set -euo pipefail
+          cd gitops
+          git config user.name  "devsecops-app CI"
+          git config user.email "actions@github.com"
+          git add values/dev/onlineboutique.yaml
+
+          # Commit message mang PROVENANCE: lịch sử gitops phải trả lời được
+          # "trạng thái này do run nào sinh ra" mà không phải đi hỏi registry.
+          git commit -F - <<EOF
+          chore(dev): bump image digests từ devsecops-app@${GITHUB_SHA:0:12}
+
+          Services: ${BUMP_SERVICES}
+
+          Mỗi digest ở đây đến từ CÙNG MỘT run xanh của build-sign-push: image đã
+          qua Trivy SCA + Trivy image, được push, ký cosign keyless, đính SBOM đã
+          ký, và cả chữ ký lẫn attestation đều đã được verify TRƯỚC khi commit này
+          được phép tồn tại.
+
+          source-repo:   ${GITHUB_REPOSITORY}
+          source-commit: ${GITHUB_SHA}
+          run:           ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+
+          # Rebase-retry thay vì `concurrency:`. Nó xử được CẢ hai run đè nhau
+          # LẪN người sửa tay repo gitops, trong ba dòng, và không thêm hành vi
+          # xếp hàng nào phải suy nghĩ lại lúc teardown.
+          for i in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "đã push (lần $i)"; exit 0
+            fi
+            echo "push bị từ chối — rebase rồi thử lại ($i/3)"
+            git pull --rebase origin main
+          done
+          echo "::error::push thất bại sau 3 lần"; exit 1
+
+      - name: Ghi kết quả lên trang run
+        if: always()
+        run: |
+          {
+            echo "### gitops bump"
+            if [ "${BUMP_RESULT:-fail}" = "changed" ]; then
+              echo "✅ đã bump: \`${BUMP_SERVICES:-}\`"
+            elif [ "${BUMP_RESULT:-}" = "nochange" ]; then
+              echo "➖ digest không đổi — gitops giữ nguyên"
+            else
+              echo "❌ bump KHÔNG chạy xong — **gitops vẫn trỏ digest của run trước**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────
+  # Bù cho chỗ mù của `needs:`: leg nào đỏ thì bump-gitops bị SKIP, và job bị
+  # skip KHÔNG kêu một tiếng nào. Hệ quả thật là gitops tiếp tục chạy digest của
+  # run trước — hành vi đúng, nhưng phải NHÌN THẤY được. Cả project này đã trả
+  # giá nhiều lần cho đúng một kiểu lỗi: cấu hình sai và cấu hình đúng cho ra
+  # cùng một màn hình sạch (I-027 gate mù · I-035 key values sai · I-047 field
+  # bị nuốt). Một dòng summary rẻ hơn nhiều so với lần thứ tư.
+  # ─────────────────────────────────────────────────────────────
+  bump-skipped:
+    name: bump-gitops (BỊ BỎ QUA)
+    runs-on: ubuntu-latest
+    needs: [gate-common, build-sign-push]
+    if: ${{ always() && needs.build-sign-push.result != 'success' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Nói rõ vì sao gitops không nhúc nhích
+        run: |
+          {
+            echo "### gitops bump: ❌ BỊ BỎ QUA"
+            echo ""
+            echo "- gate-common: \`${{ needs.gate-common.result }}\`"
+            echo "- build-sign-push: \`${{ needs.build-sign-push.result }}\`"
+            echo ""
+            echo "**Repo gitops vẫn trỏ digest của run TRƯỚC** — ArgoCD tiếp tục"
+            echo "deploy image cũ. Đây là hành vi đúng (không bump thứ chưa qua"
+            echo "gate), nhưng cụm đang KHÁC với commit mới nhất của repo app."
+          } >> "$GITHUB_STEP_SUMMARY"
