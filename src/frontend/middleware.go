@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type ctxKeyLog struct{}
@@ -68,6 +69,30 @@ func (lh *logHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	if v, ok := r.Context().Value(ctxKeySessionID{}).(string); ok {
 		log = log.WithField("session", v)
+	}
+	// Carry the trace and span ids into every log line for this request.
+	//
+	// This is the missing half of the observability story: the cluster already
+	// stores metrics, logs and traces, but nothing joins a log line to the trace
+	// it belongs to. `http.req.id` above is a UUID minted here — it identifies
+	// the request inside THIS process only, and no other service ever sees it.
+	// The trace id is the one identifier that every service on the path already
+	// shares, because it travels in the gRPC metadata.
+	//
+	// Reading it costs nothing: otelhttp.NewHandler wraps this handler from the
+	// OUTSIDE (see main.go — logHandler is added first, otelhttp last, so it is
+	// outermost), which means the span already exists in the request context by
+	// the time this runs. No new instrumentation, no change to any business path.
+	//
+	// IsValid() guards the case where tracing is disabled (ENABLE_TRACING unset):
+	// the context then holds a zero span context, and printing an all-zero trace
+	// id would be worse than printing nothing — it would look like a real id that
+	// simply cannot be found in Tempo.
+	if sc := oteltrace.SpanContextFromContext(ctx); sc.IsValid() {
+		log = log.WithFields(logrus.Fields{
+			"trace_id": sc.TraceID().String(),
+			"span_id":  sc.SpanID().String(),
+		})
 	}
 	log.Debug("request started")
 	defer func() {
