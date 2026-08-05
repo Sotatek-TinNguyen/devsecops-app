@@ -41,16 +41,26 @@
 # Ghi sai cột này thì người sửa mở nhầm repo — nên chỗ nào chưa kiểm thì nói thẳng
 # là chưa kiểm, đừng viết cho tròn.
 
-# ── NHÓM A — cookie. Chủ: [app], đã xác định CHÍNH XÁC vị trí ────────────────
-# `frontend/middleware.go:122` (shop_session-id) và `handlers.go:511` (currency).
-# Cả hai gọi http.SetCookie mà không đặt HttpOnly/Secure/SameSite. Sửa là thêm
-# 3 field vào struct http.Cookie — nhỏ, nhưng phải qua trọn vòng CI.
-# ⚠️ `Secure: true` chỉ đúng vì mọi đường vào đều là HTTPS qua ALB. Nếu sau này
-#    có ai test bằng port-forward HTTP thuần thì cookie sẽ KHÔNG được gửi, và
-#    triệu chứng là "session không giữ" — đọc không giống lỗi cookie flag chút nào.
-10010	WARN	Cookie No HttpOnly Flag — [app] frontend/middleware.go:122 + handlers.go:511. Lật FAIL sau khi vá.
-10011	WARN	Cookie Without Secure Flag — [app] cùng 2 chỗ. Lật FAIL sau khi vá.
-10054	WARN	Cookie without SameSite Attribute — [app] cùng 2 chỗ. Lật FAIL sau khi vá.
+# ── NHÓM A — cookie. Chủ: [app] ──────────────────────────────────────────────
+# ⚠️ ĐÍNH CHÍNH: bản đầu của file này ghi "2 chỗ" — SAI. Grep toàn bộ call site
+# ra BA: middleware.go:122 (shop_session-id) · handlers.go:511 (currency) ·
+# handlers.go:424 (logoutHandler, phát Set-Cookie để XOÁ cookie). Chỗ thứ ba
+# không nằm trong danh sách ZAP đưa ra, và vá thiếu nó thì response của /logout
+# vẫn trần trụi — tức bản vá "xong" mà rule vẫn WARN, đọc như bản vá không ăn.
+# Bài học: danh sách vị trí do một công cụ đưa ra là ĐIỂM BẮT ĐẦU của việc tìm,
+# không phải kết quả của nó.
+#
+# ĐÃ VÁ 2026-08-05: gom về một helper `setCookie` ở main.go, cả 3 chỗ gọi qua
+# đó — vá lẻ từng chỗ là cách mà chỗ thứ tư thêm sau này sẽ lọt trong im lặng.
+# ⚠️ VẪN GIỮ WARN, CHƯA LẬT FAIL: điều kiện lật ở đầu file là "NGAY SAU KHI"
+#    vá — mà "đã vá" ở đây mới có nghĩa `go build` xanh, CHƯA có `curl -sI` trên
+#    staging. Lật bây giờ là lật theo ý định thay vì theo phép đo (I-035).
+# ⚠️ `Secure: true` chỉ đúng vì mọi đường vào đều là HTTPS qua ALB. Test bằng
+#    port-forward HTTP thuần thì cookie KHÔNG được gửi, triệu chứng là "session
+#    không giữ" — đọc không giống lỗi cookie flag chút nào.
+10010	WARN	Cookie No HttpOnly Flag — [app] đã vá 3 call site qua helper setCookie. Lật FAIL sau khi curl -sI xác nhận trên staging.
+10011	WARN	Cookie Without Secure Flag — [app] cùng 3 chỗ, cùng điều kiện lật.
+10054	WARN	Cookie without SameSite Attribute — [app] cùng 3 chỗ, cùng điều kiện lật.
 
 # ── NHÓM B — 4 security header ALB CÓ THỂ tự set ─────────────────────────────
 # LBC trên cụm là v3.4.2, đủ mới cho annotation `listener-attributes`. ALB hỗ trợ

@@ -421,7 +421,13 @@ func (fe *frontendServer) logoutHandler(w http.ResponseWriter, r *http.Request) 
 	for _, c := range r.Cookies() {
 		c.Expires = time.Now().Add(-time.Hour * 24 * 365)
 		c.MaxAge = -1
-		http.SetCookie(w, c)
+		// Chỗ thứ ba phát Set-Cookie, và là chỗ .zap/rules.tsv KHÔNG nhắc tới —
+		// tìm ra bằng grep toàn bộ call site chứ không tin danh sách có sẵn.
+		// Cookie lấy từ r.Cookies() chỉ có Name+Value (trình duyệt không gửi lại
+		// attribute), nên response xoá cookie cũng trần trụi y hệt hai chỗ kia.
+		// Xoá vẫn đúng sau khi thêm cờ: trình duyệt khớp cookie để ghi đè theo
+		// name+domain+path, KHÔNG theo HttpOnly/Secure/SameSite.
+		setCookie(w, c)
 	}
 	w.Header().Set("Location", baseUrl + "/")
 	w.WriteHeader(http.StatusFound)
@@ -508,7 +514,7 @@ func (fe *frontendServer) setCurrencyHandler(w http.ResponseWriter, r *http.Requ
 		Debug("setting currency")
 
 	if payload.Currency != "" {
-		http.SetCookie(w, &http.Cookie{
+		setCookie(w, &http.Cookie{
 			Name:   cookieCurrency,
 			Value:  payload.Currency,
 			MaxAge: cookieMaxAge,

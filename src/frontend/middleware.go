@@ -119,7 +119,7 @@ func ensureSessionID(next http.Handler) http.HandlerFunc {
 				u, _ := uuid.NewRandom()
 				sessionID = u.String()
 			}
-			http.SetCookie(w, &http.Cookie{
+			setCookie(w, &http.Cookie{
 				Name:   cookieSessionID,
 				Value:  sessionID,
 				MaxAge: cookieMaxAge,

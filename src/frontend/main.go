@@ -45,6 +45,33 @@ const (
 	cookieCurrency  = cookiePrefix + "currency"
 )
 
+// setCookie đóng dấu 3 cờ bảo mật lên MỌI cookie frontend phát ra, rồi mới ghi.
+//
+// Tồn tại như một hàm thay vì sửa từng chỗ: có ĐÚNG BA chỗ gọi http.SetCookie
+// (session-id · currency · logout), và vá lẻ từng chỗ là cách mà chỗ thứ tư
+// thêm sau này sẽ lọt — im lặng, vì không có gì fail khi thiếu một cờ.
+//
+// ZAP baseline 2026-08-05 bắt đúng 3 rule này trên staging: 10010 Cookie No
+// HttpOnly · 10011 Cookie Without Secure · 10054 No SameSite.
+// (xem .zap/rules.tsv nhóm A — và điều kiện lật 3 rule đó sang FAIL.)
+//
+// ⚠️ Secure=true nghĩa là trình duyệt CHỈ gửi cookie qua HTTPS. Đúng với mọi
+// đường vào thật (ALB terminate TLS), NHƯNG `kubectl port-forward` là HTTP
+// thuần ⇒ session sẽ không giữ được khi debug kiểu đó. Triệu chứng ("giỏ hàng
+// trống", "currency reset mỗi lần bấm") đọc KHÔNG giống lỗi cookie flag chút
+// nào — nên ghi ở đây, đúng chỗ người ta sẽ mở ra tìm.
+func setCookie(w http.ResponseWriter, c *http.Cookie) {
+	// An toàn vì không JS nào đọc 2 cookie này: grep document.cookie trên
+	// templates/ + static/ (54 file) ra 0 dòng, với đối chứng dương là chuỗi
+	// "script" khớp 4 file ⇒ lệnh grep thật sự chạm được vào các file đó.
+	c.HttpOnly = true
+	c.Secure = true
+	// Lax chứ không Strict: Strict thì đi từ link ngoài vào storefront sẽ mất
+	// session ngay ở request đầu — đúng luồng mà một trang bán hàng sống bằng.
+	c.SameSite = http.SameSiteLaxMode
+	http.SetCookie(w, c)
+}
+
 var (
 	whitelistedCurrencies = map[string]bool{
 		"USD": true,
