@@ -1,0 +1,91 @@
+# ZAP baseline — bảng phân loại rule.  <ruleid>\t<WARN|FAIL|IGNORE>\t<lý do>
+#
+# TRẠNG THÁI HÔM NAY: 15/15 để WARN. KHÔNG rule nào FAIL, và đó là CHỦ Ý.
+#
+# Vì sao không FAIL ngay: cả 15 finding đang TỒN TẠI trên staging lúc này, chưa
+# cái nào được vá. Đặt FAIL bây giờ = lần `workflow_dispatch` đầu tiên đỏ ngay
+# ngày đầu, tức tự tay dựng lại đúng thứ vừa nhận ra là vô dụng ("gate luôn đỏ
+# thì không ai đọc" — I-039). Nhịp đã dùng hai lần và đều trả cổ tức:
+#   EXP-3b  (P2): quét observe → sửa → lật enforce trên `trivy-image`
+#   P5-2c→2d    : PSA warn+audit → đọc bằng chứng → lật `enforce`
+# Đây là bước BASELINE của cùng nhịp đó.
+#
+# ⚠️ Đọc kỹ một tính chất của công cụ, vì nó quyết định cả thiết kế gate:
+# `zap-baseline.py` xếp MỌI alert là WARN. Không rule nào là FAIL trừ khi khai
+# tường minh ở file này. Nên có đúng hai cách hỏng:
+#   - kèm `-I`  -> WARN không làm fail  -> gate LUÔN XANH
+#   - bỏ `-I`   -> WARN làm exit 2      -> gate LUÔN ĐỎ (app thật nào cũng có WARN)
+# Cả hai đều là gate trang trí. Gate chỉ có nghĩa khi file này khai FAIL cho một
+# tập rule ĐÃ ĐƯỢC VÁ — lúc đó đỏ nghĩa là "có thứ vừa hồi quy", không phải
+# "app vốn thế".
+#
+# ĐIỀU KIỆN LẬT (viết ra ở đây để nó không thành lời hứa miệng):
+#   lật 10010 · 10011 · 10054 sang FAIL  NGAY SAU KHI `frontend` set đủ 3 cờ cookie
+#   lật 10020 · 10021 · 10035 · 10038 sang FAIL  NGAY SAU KHI 4 header có mặt
+#                                                (đo bằng `curl -sI`, không đoán)
+#   phần còn lại: giữ WARN, lý do từng dòng ở dưới.
+#
+# BASELINE ĐO ĐƯỢC 2026-08-05 — `https://boutique-dev.devops.sotatek.works`
+#   FAIL-NEW 0 · WARN-NEW 15 · PASS 52 · exit code 0
+# Response header thật lúc đó (curl -sI) chỉ có: content-type · date · set-cookie.
+# Không MỘT security header nào. `set-cookie: shop_session-id=<uuid>; Max-Age=172800`
+# — không HttpOnly, không Secure, không SameSite.
+#
+# ── CỘT "AI SỬA" quan trọng ngang cột phân loại ───────────────────────────────
+# Nó là claim về CHỖ BẢN VÁ RƠI XUỐNG, và hai nhóm dưới đây đi hai đường khác hẳn:
+#   [app]    repo devsecops-app -> qua TRỌN vòng CI (gitleaks→Semgrep→Trivy→SBOM→
+#            cosign→ECR→bump digest) -> ArgoCD sync. Đắt, nhưng là đường duy nhất
+#            cho thứ nằm trong code.
+#   [gitops] repo devsecops-gitops -> chỉ là values Ingress, KHÔNG chạy CI, KHÔNG
+#            sinh digest mới. Rẻ hơn một bậc.
+# Ghi sai cột này thì người sửa mở nhầm repo — nên chỗ nào chưa kiểm thì nói thẳng
+# là chưa kiểm, đừng viết cho tròn.
+
+# ── NHÓM A — cookie. Chủ: [app], đã xác định CHÍNH XÁC vị trí ────────────────
+# `frontend/middleware.go:122` (shop_session-id) và `handlers.go:511` (currency).
+# Cả hai gọi http.SetCookie mà không đặt HttpOnly/Secure/SameSite. Sửa là thêm
+# 3 field vào struct http.Cookie — nhỏ, nhưng phải qua trọn vòng CI.
+# ⚠️ `Secure: true` chỉ đúng vì mọi đường vào đều là HTTPS qua ALB. Nếu sau này
+#    có ai test bằng port-forward HTTP thuần thì cookie sẽ KHÔNG được gửi, và
+#    triệu chứng là "session không giữ" — đọc không giống lỗi cookie flag chút nào.
+10010	WARN	Cookie No HttpOnly Flag — [app] frontend/middleware.go:122 + handlers.go:511. Lật FAIL sau khi vá.
+10011	WARN	Cookie Without Secure Flag — [app] cùng 2 chỗ. Lật FAIL sau khi vá.
+10054	WARN	Cookie without SameSite Attribute — [app] cùng 2 chỗ. Lật FAIL sau khi vá.
+
+# ── NHÓM B — 4 security header ALB CÓ THỂ tự set ─────────────────────────────
+# LBC trên cụm là v3.4.2, đủ mới cho annotation `listener-attributes`. ALB hỗ trợ
+# đúng 4 header này ở tầng listener: HSTS · CSP · X-Content-Type-Options ·
+# X-Frame-Options. Nếu đường đó chạy thì bản vá là [gitops] — values Ingress, rẻ
+# hơn hẳn một vòng CI cho mỗi header.
+# 🟡 CHƯA KIỂM TRỰC TIẾP trên cụm này. Đây là ứng viên, không phải kết luận —
+#    phải thử một annotation rồi `curl -sI` xem header có ra không. Ứng viên dự
+#    phòng là [app] (Go handler), đắt hơn nhưng chắc chắn làm được.
+10020	WARN	Missing Anti-clickjacking Header — [gitops?] ALB x_frame_options, CHƯA KIỂM. Dự phòng [app].
+10021	WARN	X-Content-Type-Options Missing — [gitops?] ALB x_content_type_options, CHƯA KIỂM. Dự phòng [app].
+10035	WARN	HSTS Not Set — [gitops?] ALB strict_transport_security, CHƯA KIỂM. Dự phòng [app].
+10038	WARN	CSP Not Set — [gitops?] ALB content_security_policy, CHƯA KIỂM. CSP cho app có inline script cần soạn kỹ, đừng copy mẫu.
+
+# ── NHÓM C — header ALB KHÔNG set được ⇒ chắc chắn [app] ─────────────────────
+# Hai cái này không nằm trong tập listener attribute của ALB, nên không có đường
+# rẻ. Giá trị bảo mật thực tế cho một storefront demo là thấp hơn nhóm A/B ⇒ để
+# WARN, không hứa hẹn.
+10063	WARN	Permissions-Policy Not Set — [app] only. Ưu tiên thấp hơn nhóm A/B.
+90004	WARN	COEP Missing/Invalid — [app] only. Đi kèm COOP/CORP, là hardening sâu.
+
+# ── NHÓM D — thuộc về UPSTREAM, ta KHÔNG nhận nuôi ───────────────────────────
+# Dự án chỉ nhận nuôi productcatalogservice (Go) + currencyservice (Node).
+# `frontend` là code Google, ta mới chạm đúng 1 lần (middleware.go, thêm trace_id).
+# Vá 10202 nghĩa là đổi mô hình form của toàn bộ storefront — ngoài phạm vi, và
+# nói thẳng ra thì đó là quyết định phạm vi, KHÔNG phải "rủi ro chấp nhận được".
+10202	WARN	Absence of Anti-CSRF Tokens — upstream, ngoài phạm vi nhận nuôi. Ghi là GIỚI HẠN PHẠM VI, không phải đã đánh giá là an toàn.
+90003	WARN	Sub Resource Integrity Missing — template HTML upstream. Cùng lý do.
+
+# ── NHÓM E — cache/thông tin. Giữ WARN, KHÔNG chuyển IGNORE ──────────────────
+# Cố ý không dùng IGNORE: IGNORE làm finding biến mất khỏi output, và một dòng
+# biến mất thì lần sau không ai đọc lại được lý do. WARN vẫn hiện, vẫn đếm được,
+# chỉ là không chặn. Cùng lập luận đã dùng khi giữ SARIF đầy đủ bên cạnh gate
+# `--severity HIGH,CRITICAL` ở repo infra: ngưỡng chặn và tầm nhìn là hai việc.
+10015	WARN	Re-examine Cache-control — asset tĩnh của storefront. Không chặn, nhưng để nhìn thấy.
+10049	WARN	Storable and Cacheable Content — cùng nhóm 10015.
+10112	WARN	Session Management Response Identified — ZAP nhận diện cơ chế session, mang tính thông tin.
+10029	WARN	Cookie Poisoning — 1 lần, khả năng cao là false positive; đánh giá lại sau khi nhóm A vá xong.

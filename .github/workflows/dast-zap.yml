@@ -1,0 +1,115 @@
+# ─────────────────────────────────────────────────────────────
+# dast-zap — DAST (ZAP baseline) quét staging.
+#
+# ⚠️ CỐ Ý CHỈ CÓ `workflow_dispatch`. KHÔNG `pull_request`, KHÔNG `push`,
+#    KHÔNG `schedule`. Đây là quyết định thiết kế, không phải chưa làm xong.
+#
+# VÌ SAO: mục tiêu quét là **cụm dev, bị `terraform destroy` mỗi buổi**. Phần lớn
+# thời gian trong tuần nó KHÔNG TỒN TẠI. Một job ZAP chạy theo PR sẽ không chỉ
+# "ồn" — nó **đỏ vì một lý do không liên quan gì tới PR đó**, và người đọc sẽ đi
+# tìm lỗi trong diff của mình. Đó tệ hơn ồn: nó gửi người ta đi sai hướng.
+# Cùng lập luận đã dùng ở repo infra để CỐ Ý bỏ `terraform plan` khỏi CI
+# (`terraform-workflow.yml`): cụm tắt thì plan ra ~80-to-add cho MỌI PR, tín hiệu
+# đó không phân biệt được "PR này thêm gì" với "cụm đang tắt" — và gate không ai
+# đọc nổi thì tệ hơn không có gate (I-039 · 30 defaultRules firing vào hư không).
+#
+# Chỗ đúng để nó xuất hiện trong nhịp làm việc là **một bước của buổi cụm**
+# (`session-p5-cluster.md`), nơi target chắc chắn đang sống — không phải một
+# trigger CI giả vờ rằng staging luôn ở đó.
+#
+# GATE HAY KHÔNG: hôm nay **KHÔNG** phải gate — `.zap/rules.tsv` để cả 15 rule ở
+# WARN. Lý do đầy đủ nằm trong chính file đó (tóm tắt: `zap-baseline.py` xếp MỌI
+# alert là WARN, nên kèm `-I` là luôn xanh, bỏ `-I` là luôn đỏ; gate chỉ có nghĩa
+# sau khi một tập rule đã được VÁ và chuyển sang FAIL). Đây là bước BASELINE của
+# nhịp observe→enforce đã dùng ở EXP-3b và P5-2c→2d.
+# ─────────────────────────────────────────────────────────────
+name: dast-zap
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "URL staging (phải đang SỐNG — cụm dev destroy mỗi buổi)"
+        required: true
+        default: "https://boutique-dev.devops.sotatek.works"
+      fail_on_warn:
+        description: "true = bỏ -I, WARN sẽ làm job đỏ. Để false cho tới khi rules.tsv có FAIL."
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  zap-baseline:
+    name: zap-baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # ── Cửa gác: target có SỐNG không, và có phải host của mình không.
+      # Chạy TRƯỚC khi kéo image ZAP (~1GB) vì hai lý do:
+      #   1. cụm tắt là ca THƯỜNG GẶP nhất ở project này -> hỏng sớm, thông báo rõ,
+      #      thay vì để ZAP chạy vào hư không rồi trả một report rỗng trông như
+      #      "quét sạch, không finding" (đó đúng là I-027: gate cho ra 0 vì không
+      #      chạm được vào đối tượng, không phải vì đối tượng sạch).
+      #   2. guard host: biến sai phải làm job DỪNG, không được làm job quét NHẦM
+      #      một địa chỉ khác (bài I-054 + 29/07 — biến rỗng làm lệnh chạy khác đi).
+      - name: Cửa gác — target hợp lệ và đang sống
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            https://*.devops.sotatek.works|https://*.devops.sotatek.works/) ;;
+            *) echo "::error::TARGET '$TARGET' không thuộc devops.sotatek.works — DỪNG."; exit 1 ;;
+          esac
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$TARGET" || echo 000)
+          echo "target=$TARGET  HTTP=$code"
+          if [ "$code" = "000" ]; then
+            echo "::error::Không nối được tới $TARGET. Cụm dev nhiều khả năng đang tắt (destroy mỗi buổi) — dựng cụm rồi chạy lại."
+            exit 1
+          fi
+          if [ "$code" -ge 400 ]; then
+            echo "::error::Target trả HTTP $code — quét bây giờ sẽ cho ra report vô nghĩa."
+            exit 1
+          fi
+
+      # Dùng `docker run` thẳng thay vì action ZAP của bên thứ ba: mỗi action
+      # third-party là thêm một nhà cung cấp phải tin trong chuỗi cung ứng CI —
+      # cùng lý do repo này cài gitleaks bằng curl và repo infra cài tflint/trivy
+      # bằng curl thay vì dùng action có sẵn.
+      #
+      # -j  ajax spider: storefront render bằng JS, spider thường bỏ sót.
+      # -m 3 trần thời gian spider.
+      # -I  KHÔNG fail trên WARN — tắt được qua input khi rules.tsv đã có FAIL.
+      # -c  bảng phân loại + lý do từng rule.
+      - name: ZAP baseline
+        env:
+          TARGET: ${{ inputs.target }}
+          FAIL_ON_WARN: ${{ inputs.fail_on_warn }}
+        run: |
+          set -euo pipefail
+          mkdir -p zap-out && chmod 777 zap-out
+          IGNORE_WARN="-I"
+          [ "$FAIL_ON_WARN" = "true" ] && IGNORE_WARN=""
+          docker run --rm \
+            -v "$PWD/.zap:/zap/wrk/.zap:ro" \
+            -v "$PWD/zap-out:/zap/wrk/out" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t "$TARGET" $IGNORE_WARN -j -m 3 \
+              -c .zap/rules.tsv \
+              -r out/report.html -J out/report.json -w out/report.md
+
+      # `if: always()` — report có giá trị NHẤT đúng lúc gate vừa đỏ. Cùng lý do
+      # với bước SARIF của terraform-workflow.yml ở repo infra.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zap-report-${{ github.sha }}
+          path: zap-out/
+          retention-days: 14
+          if-no-files-found: warn
